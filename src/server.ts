@@ -1,9 +1,9 @@
 import 'dotenv/config';
 import Fastify from 'fastify';
 import { createHmac } from 'crypto';
-import { messageQueue } from '../queue/messageQueue.js';
-import { extractMessage } from '../lib/whatsapp.js';
-import { supabase } from '../lib/supabase.js';
+import { messageQueue } from './queue/messageQueue.js';
+import { extractMessage } from './lib/whatsapp.js';
+import { supabase } from './lib/supabase.js';
 
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN!;
 const APP_SECRET = process.env.WHATSAPP_APP_SECRET ?? '';  // para validação HMAC

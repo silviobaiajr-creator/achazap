@@ -8,23 +8,35 @@ const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN!;
  * Envia uma mensagem de texto simples para um número WhatsApp.
  */
 export async function sendTextMessage(to: string, text: string): Promise<void> {
-    await axios.post(
-        `${BASE_URL}/${PHONE_NUMBER_ID}/messages`,
-        {
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
-            to,
-            type: 'text',
-            text: { body: text },
-        },
-        {
-            headers: {
-                Authorization: `Bearer ${ACCESS_TOKEN}`,
-                'Content-Type': 'application/json',
+    if (ACCESS_TOKEN.startsWith('EAAxxxxx') || !ACCESS_TOKEN) {
+        console.log(`\\n📱 [SIMULADOR WHATSAPP] Mensagem enviada para ${to}:`);
+        console.log(`\\x1b[36m${text}\\x1b[0m\\n`);
+        return;
+    }
+
+    try {
+        await axios.post(
+            `${BASE_URL}/${PHONE_NUMBER_ID}/messages`,
+            {
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to,
+                type: 'text',
+                text: { body: text },
             },
-        }
-    );
+            {
+                headers: {
+                    Authorization: `Bearer ${ACCESS_TOKEN}`,
+                    'Content-Type': 'application/json',
+                },
+            }
+        );
+    } catch (error: any) {
+        console.error('❌ Erro real na API do WhatsApp:', error?.response?.data || error.message);
+        throw error;
+    }
 }
+
 
 /**
  * Faz download de mídia (imagem/áudio) a partir do media_id retornado pelo webhook.

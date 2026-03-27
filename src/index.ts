@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { buildServer } from './server.js';
-import { messageWorker } from './queue/messageQueue.js';
+import { messageWorker } from './processor/messageProcessor.js';
 
 const PORT = Number(process.env.PORT ?? 3000);
 
