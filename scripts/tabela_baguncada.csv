@@ -1,0 +1,26 @@
+CODIGO INT,   DESCRICAO DO PRODUTO NO PDV  , ESTOQUE, PRECO_VENDA,  CUSTO, FORNECEDOR, OBSERVACOES
+1001,       " Arroz Agulhinha 5kg Camil ", 50,      26.50,       18.00, DISTRIBUIDORA A, "Promo da semana"
+, , , , , , 
+1002, Feijao Carioca Kicaldo 1kg, 120, 8.90, 5.00, ,
+1003, "Oleo de Soja Liza 900ml", 80, 7.89, 4.50, B BUNGE, 
+--- FIM DA SECAO DE GRAOS ---
+8001, Detergente Ype Neutro 500ml, 300, 2.45, 1.20, YPE, 
+8002, "Amaciante Comfort 2L", 40, 19.90, 12.00, UNILEVER, 
+9999, "==== LINHA EM BRANCO ====",,, , ,
+  , Guarana Antarctica 2L ,  , 7.99,  , AMBEV, 
+, Coca Cola 2.5L, 60, 11.49, 8.00,, "Nao tem desconto"
+4010, Leite Integral Paulista 1L, 200, 5.90, , , 
+4011, Cafe Pilao Almofada 500g, 150, 16.90, 10.00, ,
+4012, Acucar Refinado Uniao 1kg, 80, 4.50, 2.50, ,
+    ,   Macarrao Espaguete Barilla 500g , 50, 7.30, 4.00, ,
+1122, Sabonete Dove Branco 90g, 100, 4.10, 2.20, UNILEVER, 
+1123, Creme Dental Colgate 90g, 150, 4.80, 2.50, COLGATE,
+,,,
+,,,
+9001, Cerveja Heineken Lata 350ml, 600, 5.49, 3.80, HEINEKEN, 
+9002, Cerveja Stella Artois Long Neck, 300, 6.20, 4.50, AMBEV, 
+9003, Suco Del Valle Uva 1L, 100, 8.50, 5.50, COCA COLA, 
+,, Produto Descontinuado Nao Vender,, ,, 
+1022, Farinha de Trigo Dona Benta 1kg, 120, 5.80, 3.50, ,
+1023, Molho de Tomate Pomarola 340g, 200, 2.99, 1.50, ,
+1024, Azeite Gallo Extra Virgem 500ml, 40, 39.90, 25.00, , "Muito caro"

@@ -35,6 +35,9 @@ export function buildServer() {
     app.post('/webhook', {
         config: { rawBody: true },   // necessário para validar assinatura HMAC
     }, async (request, reply) => {
+        // Flagra tudo que a Meta manda para nós
+        console.log('\\n[Meta Webhook Raw Body]:', JSON.stringify(request.body, null, 2));
+
         // Valida assinatura HMAC (segurança — confirma que veio da Meta)
         if (APP_SECRET) {
             const signature = (request.headers['x-hub-signature-256'] as string) ?? '';

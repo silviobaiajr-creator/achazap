@@ -39,13 +39,37 @@ export async function sendTextMessage(to: string, text: string): Promise<void> {
 
 
 /**
- * Faz download de mídia (imagem/áudio) a partir do media_id retornado pelo webhook.
+ * Retorna a URL segura de download da mídia a partir do media_id.
  */
 export async function getMediaUrl(mediaId: string): Promise<string> {
+    if (ACCESS_TOKEN.startsWith('EAAxxxxx')) {
+        return 'https://example.com/mock-media-url';
+    }
     const { data } = await axios.get(`${BASE_URL}/${mediaId}`, {
         headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
     });
     return data.url as string;
+}
+
+/**
+ * Faz download binário da mídia (CSV, Foto, Áudio) já autenticado.
+ */
+export async function downloadMedia(mediaId: string): Promise<Buffer> {
+    const url = await getMediaUrl(mediaId);
+    
+    if (ACCESS_TOKEN.startsWith('EAAxxxxx')) {
+        // Mock avançado: lê a tabela bagunçada do disco para testar a inteligência do Gemini
+        const fs = await import('fs');
+        const path = await import('path');
+        const filePath = path.resolve(process.cwd(), 'scripts', 'tabela_baguncada.csv');
+        return fs.readFileSync(filePath);
+    }
+
+    const { data } = await axios.get(url, {
+        headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+        responseType: 'arraybuffer',
+    });
+    return Buffer.from(data);
 }
 
 /**

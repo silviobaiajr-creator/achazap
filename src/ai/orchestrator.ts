@@ -1,19 +1,22 @@
-import { GoogleGenAI, Type } from '@google/genai';
-import { sendTextMessage, type WhatsAppMessage } from '../lib/whatsapp.js';
+import { GoogleGenAI, Type, Part } from '@google/genai';
+import { sendTextMessage, downloadMedia, type WhatsAppMessage } from '../lib/whatsapp.js';
 import {
     buscarOfertasPorRegiao,
     analisarHistoricoPreco,
     gerarLinkRedirecionamento,
     cadastrarAtualizarUsuario,
     obterPerfilUsuario,
+    obterPerfilLoja,
+    ingerirCatalogo,
+    obterEstatisticasLoja,
 } from './skills.js';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
 // ============================================================
-// Definição das tools para o Gemini (Function Calling)
+// As tools (Skills)
 // ============================================================
-const tools = [
+const toolsUsuario = [
     {
         functionDeclarations: [
             {
@@ -44,7 +47,7 @@ const tools = [
             },
             {
                 name: 'gerar_link_redirecionamento',
-                description: 'Gera link intermediário do AchaZap. O clique do usuário nesse link debita 1 clique da loja e redireciona para o WhatsApp.',
+                description: 'Gera link do AchaZap. O clique desse link debita 1 clique da loja e redireciona para o WhatsApp.',
                 parameters: {
                     type: Type.OBJECT,
                     properties: {
@@ -74,7 +77,7 @@ const tools = [
             },
             {
                 name: 'obter_perfil_usuario',
-                description: 'Recupera o perfil (cidade e bairro) de um usuário pelo WhatsApp.',
+                description: 'Recupera o perfil (cidade e bairro) do usuário.',
                 parameters: {
                     type: Type.OBJECT,
                     properties: {
@@ -87,88 +90,150 @@ const tools = [
     },
 ];
 
+const toolsLojista = [
+    {
+        functionDeclarations: [
+            {
+                name: 'ingerir_catalogo',
+                description: 'Grava produtos extraídos do CSV, Imagem ou Áudio no catálogo da loja.',
+                parameters: {
+                    type: Type.OBJECT,
+                    properties: {
+                        loja_id: { type: Type.STRING },
+                        itens: {
+                            type: Type.ARRAY,
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    produto_nome: { type: Type.STRING },
+                                    preco: { type: Type.NUMBER },
+                                    unidade: { type: Type.STRING, description: "ex: 'un', 'kg', 'cx'" },
+                                },
+                                required: ['produto_nome', 'preco'],
+                            },
+                        },
+                        fonte_ingestao: { type: Type.STRING, description: "'csv' | 'foto' | 'audio' | 'manual'" },
+                    } as Record<string, { type: Type; description?: string }>,
+                    required: ['loja_id', 'itens', 'fonte_ingestao'],
+                },
+            },
+            {
+                name: 'obter_estatisticas_loja',
+                description: 'Recupera o saldo de cliques, o ranking dos produtos mais clicados e o total de visitas (cliques) dos últimos 30 dias.',
+                parameters: {
+                    type: Type.OBJECT,
+                    properties: {
+                        loja_id: { type: Type.STRING },
+                    } as Record<string, { type: Type; description?: string }>,
+                    required: ['loja_id'],
+                },
+            },
+        ],
+    },
+];
 
-// ============================================================
-// Mapa de execução das skills
-// ============================================================
 async function executarSkill(name: string, args: Record<string, unknown>) {
     switch (name) {
         case 'buscar_ofertas_por_regiao':
-            return buscarOfertasPorRegiao(args as Parameters<typeof buscarOfertasPorRegiao>[0]);
+            return buscarOfertasPorRegiao(args as any);
         case 'analisar_historico_preco':
-            return analisarHistoricoPreco(args as Parameters<typeof analisarHistoricoPreco>[0]);
+            return analisarHistoricoPreco(args as any);
         case 'gerar_link_redirecionamento':
-            return gerarLinkRedirecionamento(args as Parameters<typeof gerarLinkRedirecionamento>[0]);
+            return gerarLinkRedirecionamento(args as any);
         case 'cadastrar_atualizar_usuario':
-            return cadastrarAtualizarUsuario(args as Parameters<typeof cadastrarAtualizarUsuario>[0]);
+            return cadastrarAtualizarUsuario(args as any);
         case 'obter_perfil_usuario':
-            return obterPerfilUsuario(args as Parameters<typeof obterPerfilUsuario>[0]);
+            return obterPerfilUsuario(args as any);
+        case 'ingerir_catalogo':
+            return ingerirCatalogo(args as any);
+        case 'obter_estatisticas_loja':
+            return obterEstatisticasLoja(args as any);
         default:
             throw new Error(`Skill desconhecida: ${name}`);
     }
 }
 
 // ============================================================
-// System prompt da IA
-// ============================================================
-const SYSTEM_PROMPT = `
-Você é o AchaZap, um assistente de IA via WhatsApp que ajuda moradores a encontrar 
-produtos no varejo do seu bairro (supermercados, farmácias, lojas de construção, etc.).
-
-REGRAS IMPORTANTES:
-1. Sempre use obter_perfil_usuario no início da conversa para obter a localização do usuário.
-2. Se não houver perfil, colete nome, cidade e bairro antes de qualquer busca.
-3. Ao encontrar produtos, sempre use analisar_historico_preco para avisar se é oferta real.
-4. Gere o link intermediário via gerar_link_redirecionamento — nunca wa.me direto.
-5. Seja conciso, amigável e use emojis com moderação.
-6. Responda sempre em português do Brasil.
-`;
-
-// ============================================================
 // Orquestrador principal
 // ============================================================
 export async function processMessage(msg: WhatsAppMessage): Promise<void> {
-    const userText = msg.text?.body ?? '[mensagem não textual recebida]';
-    const messageContext = `[Número de WhatsApp do Usuário: ${msg.from}]\nMensagem do Usuário: ${userText}`;
+    const from = msg.from;
+    const loja = await obterPerfilLoja({ whatsapp: from });
+
+    const isLojista = !!loja;
+    const tools = isLojista ? toolsLojista : toolsUsuario;
+
+    const SYSTEM_PROMPT = isLojista
+        ? `Você é o AchaZap (Portal do Lojista). Você está falando com o gestor da loja '${loja.nome}' (ID: ${loja.id}).
+O lojista pode:
+1. Enviar anexos (Planilhas, Fotos, Áudios) de preços -> Chame ingerir_catalogo.
+2. Perguntar sobre o desempenho, saldo ou cliques da loja -> Chame obter_estatisticas_loja.
+Seja extremamente profissional, use termos como "Performance", "Engajamento" e "Retorno sobre Investimento".
+Ao mostrar o ranking de produtos, use emojis de medalha (🥇, 🥈, 🥉) para gerar valor.`
+        : `Você é o AchaZap, o maior buscador de ofertas locais do WhatsApp.
+REGRAS CRÍTICAS DE NEGÓCIOS (LEAD CEGO):
+1. NUNCA revele o nome ou o endereço exato da loja na sua resposta em texto.
+2. Diga apenas o Bairro da loja e o preço encontrado. Ex: "Encontrei no Umarizal por R$ 20,00".
+3. VERIFIQUE o campo "faz_delivery" retornado na busca para adaptar sua resposta:
+   - Se faz_delivery=true: Diga "Clique no link abaixo para ver qual é a loja e já pedir pelo WhatsApp para entregarem ou separarem o seu!"
+   - Se faz_delivery=false: Diga "Clique no link abaixo para descobrir qual é o mercado e garantir essa oferta física antes que o estoque acabe."
+4. Sempre chame gerar_link_redirecionamento() para criar o link magico e entregue-o ao usuário para "revelar a loja" e garantir o repasse.
+5. Sempre chame obter_perfil_usuario() no primeiro Oi para obter cidade/bairro.`;
+
+    // Processar conteúdo e mídias
+    let payloadParts: Part[] = [];
+
+    // Adiciona o texto principal
+    const userText = msg.text?.body ? `[WhatsApp: ${from}]\nMensagem: ${msg.text.body}` : `[WhatsApp: ${from}]`;
+    payloadParts.push({ text: userText });
+
+    // Lida com anexos/mídia
+    if (msg.type === 'document' && msg.document) {
+        const buffer = await downloadMedia(msg.document.id);
+        // Considerando CSV nativamente como texto
+        payloadParts.push({ text: `\n[PLANILHA ANEXADA]:\n${buffer.toString('utf-8')}` });
+    } else if (msg.type === 'image' && msg.image) {
+        const buffer = await downloadMedia(msg.image.id);
+        payloadParts.push({ inlineData: { data: buffer.toString('base64'), mimeType: msg.image.mime_type } });
+    } else if (msg.type === 'audio' && msg.audio) {
+        const buffer = await downloadMedia(msg.audio.id);
+        payloadParts.push({ inlineData: { data: buffer.toString('base64'), mimeType: msg.audio.mime_type } });
+    }
 
     const chat = ai.chats.create({
         model: 'gemini-2.5-flash',
-        config: {
-            systemInstruction: SYSTEM_PROMPT,
-            tools,
-        },
+        config: { systemInstruction: SYSTEM_PROMPT, tools },
     });
 
-    let response = await chat.sendMessage({ message: messageContext });
+    let response = await chat.sendMessage({ message: payloadParts });
 
-    // Loop de Function Calling até a IA dar uma resposta final de texto
+    // Loop de Function Calling
     while (true) {
         const functionCalls = response.functionCalls ?? [];
 
         if (functionCalls.length === 0) {
-            // Resposta final — envia ao usuário
             const finalText = response.text;
+            console.log(`[Gemini] Resposta final gerada:`, finalText);
             if (finalText) {
-                await sendTextMessage(msg.from, finalText);
+                console.log(`[WhatsApp] Disparando sendTextMessage para ${from}...`);
+                await sendTextMessage(from, finalText);
+                console.log(`[WhatsApp] Mensagem enviada fisicamente para a Meta sem falhas!`);
+            } else {
+                console.log(`[Aviso] O Gemini retornou texto VAZIO e o Axios não foi chamado.`);
             }
             break;
         }
 
-        // Executa todas as skills chamadas pela IA
         const functionResponses = await Promise.all(
             functionCalls.map(async (fc) => {
                 console.log(`[Gemini] Chamando skill: ${fc.name}`, fc.args);
                 const result = await executarSkill(fc.name!, fc.args as Record<string, unknown>);
-                return {
-                    name: fc.name!,
-                    response: { result },
-                };
+                return { name: fc.name!, response: { result } };
             })
         );
 
-        // Retorna os resultados para a IA continuar
-        response = await chat.sendMessage({ message: functionResponses.map(fr => ({
-            functionResponse: fr
-        })) });
+        response = await chat.sendMessage({
+            message: functionResponses.map(fr => ({ functionResponse: fr }))
+        });
     }
 }

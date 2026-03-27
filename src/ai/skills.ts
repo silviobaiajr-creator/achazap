@@ -137,3 +137,92 @@ export async function obterPerfilUsuario(args: { whatsapp: string }) {
 
     return data ?? null;
 }
+
+// ============================================================
+// SKILL: obter_perfil_loja
+// ============================================================
+export async function obterPerfilLoja(args: { whatsapp: string }) {
+    const { data } = await supabase
+        .from('lojas')
+        .select('id, nome, cidade, bairro, saldo_cliques, ativa')
+        .eq('whatsapp', args.whatsapp)
+        .single();
+
+    return data ?? null;
+}
+
+// ============================================================
+// SKILL: ingerir_catalogo
+// ============================================================
+export async function ingerirCatalogo(args: {
+    loja_id: string;
+    itens: { produto_nome: string; preco: number; unidade?: string }[];
+    fonte_ingestao: 'csv' | 'foto' | 'audio' | 'manual';
+}) {
+    if (!args.itens || args.itens.length === 0) return { sucesso: false, inseridos: 0 };
+
+    const payload = args.itens.map(item => ({
+        loja_id: args.loja_id,
+        produto_nome: item.produto_nome,
+        preco: item.preco,
+        unidade: item.unidade ?? 'un',
+        disponivel: true,
+        fonte_ingestao: args.fonte_ingestao,
+    }));
+
+    const { error, data } = await supabase
+        .from('catalogo_historico')
+        .insert(payload)
+        .select('id');
+
+    if (error) throw new Error(`ingerir_catalogo: ${error.message}`);
+    return { sucesso: true, inseridos: data.length };
+}
+
+// ============================================================
+// SKILL: obter_estatisticas_loja
+// ============================================================
+export async function obterEstatisticasLoja(args: { loja_id: string }) {
+    // 1. Saldo e Status
+    const { data: loja, error: errorLoja } = await supabase
+        .from('lojas')
+        .select('saldo_cliques, ativa')
+        .eq('id', args.loja_id)
+        .single();
+
+    if (errorLoja) throw new Error(`obter_estatisticas (loja): ${errorLoja.message}`);
+
+    // 2. Cliques Totais (últimos 30 dias)
+    const trintaDiasAtras = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { count: cliquesTotal } = await supabase
+        .from('cliques_consumidos')
+        .select('*', { count: 'exact', head: true })
+        .eq('loja_id', args.loja_id)
+        .eq('debitado', true)
+        .gte('consumido_em', trintaDiasAtras);
+
+    // 3. Top 3 Produtos mais clicados
+    const { data: topProdutos } = await supabase
+        .from('cliques_consumidos')
+        .select('produto_ref')
+        .eq('loja_id', args.loja_id)
+        .eq('debitado', true);
+
+    // Processamento manual do ranking (Supabase JS não faz Group By complexo nativamente no select)
+    const ranking: Record<string, number> = {};
+    topProdutos?.forEach(p => {
+        ranking[p.produto_ref] = (ranking[p.produto_ref] || 0) + 1;
+    });
+
+    const top3 = Object.entries(ranking)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([nome, total]) => ({ produto: nome, cliques: total }));
+
+    return {
+        saldo: loja.saldo_cliques,
+        status: loja.ativa ? 'Ativa' : 'Pausada',
+        cliques_30d: cliquesTotal || 0,
+        ranking_top_3: top3
+    };
+}
