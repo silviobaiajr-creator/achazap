@@ -7,16 +7,19 @@ import { randomUUID } from 'crypto';
 export async function buscarOfertasPorRegiao(args: {
     cidade: string;
     bairro: string;
+    estado: string;
     query: string;
 }) {
     // Busca o produto mais recente de cada loja disponível na região
     const { data, error } = await supabase.rpc('buscar_ofertas', {
         p_cidade: args.cidade,
         p_bairro: args.bairro,
+        p_estado: args.estado,
         p_query: args.query,
     });
 
     if (error) throw new Error(`buscar_ofertas: ${error.message}`);
+    console.log(`[Skills] buscarOfertas retornou ${data?.length || 0} itens para "${args.query}" em ${args.bairro}/${args.cidade}`);
     return data ?? [];
 }
 
@@ -65,6 +68,7 @@ export async function gerarLinkRedirecionamento(args: {
     usuario_id: string;
     produto_nome: string;
     preco: number;
+    bairro: string;
     faz_delivery: boolean;
     whatsapp_loja: string;
 }) {
@@ -81,15 +85,14 @@ export async function gerarLinkRedirecionamento(args: {
         usuario_id: args.usuario_id,
         produto_ref: args.produto_nome,
         link_token: token,
+        link_gerado: waLink,      // SALVA O LINK COMPLETO NO BANCO
         debitado: false,          // ainda não debitado (aguarda o clique)
         motivo_skip: 'pendente',  // será null após o clique real
     });
 
     if (error) throw new Error(`gerar_link: ${error.message}`);
 
-    const redirectLink = `${process.env.BASE_URL ?? 'https://seudominio.com'}/r?token=${token}&wa=${encodeURIComponent(waLink)}`;
-
-    return { redirect_link: redirectLink, mensagem_preview: mensagem, token };
+    return { token };
 }
 
 // ============================================================
@@ -100,6 +103,7 @@ export async function cadastrarAtualizarUsuario(args: {
     nome?: string;
     cidade: string;
     bairro: string;
+    estado: string;
 }) {
     const { data: existente } = await supabase
         .from('usuarios')
@@ -110,14 +114,20 @@ export async function cadastrarAtualizarUsuario(args: {
     if (existente) {
         await supabase
             .from('usuarios')
-            .update({ cidade: args.cidade, bairro: args.bairro, nome: args.nome })
+            .update({ cidade: args.cidade, bairro: args.bairro, estado: args.estado, nome: args.nome })
             .eq('whatsapp', args.whatsapp);
         return { usuario_id: existente.id, novo_cadastro: false };
     }
 
     const { data, error } = await supabase
         .from('usuarios')
-        .insert({ whatsapp: args.whatsapp, nome: args.nome, cidade: args.cidade, bairro: args.bairro })
+        .insert({ 
+            whatsapp: args.whatsapp, 
+            nome: args.nome, 
+            cidade: args.cidade, 
+            bairro: args.bairro,
+            estado: args.estado 
+        })
         .select('id')
         .single();
 
@@ -131,10 +141,15 @@ export async function cadastrarAtualizarUsuario(args: {
 export async function obterPerfilUsuario(args: { whatsapp: string }) {
     const { data } = await supabase
         .from('usuarios')
-        .select('id, nome, cidade, bairro')
+        .select('id, nome, cidade, bairro, estado')
         .eq('whatsapp', args.whatsapp)
         .single();
 
+    if (data) {
+        console.log(`[Skills] Perfil encontrado para ${args.whatsapp}:`, data.nome, data.cidade);
+    } else {
+        console.log(`[Skills] Perfil NÃO encontrado para ${args.whatsapp}`);
+    }
     return data ?? null;
 }
 
@@ -144,7 +159,7 @@ export async function obterPerfilUsuario(args: { whatsapp: string }) {
 export async function obterPerfilLoja(args: { whatsapp: string }) {
     const { data } = await supabase
         .from('lojas')
-        .select('id, nome, cidade, bairro, saldo_cliques, ativa')
+        .select('id, nome, cidade, bairro, estado, saldo_cliques, ativa')
         .eq('whatsapp', args.whatsapp)
         .single();
 

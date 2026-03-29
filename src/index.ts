@@ -9,9 +9,10 @@ async function main() {
 
     try {
         await app.listen({ port: PORT, host: '0.0.0.0' });
+        const publicUrl = process.env.BASE_URL ?? `http://localhost:${PORT}`;
         console.log(`✅ AchaZap rodando na porta ${PORT}`);
-        console.log(`📡 Webhook: http://localhost:${PORT}/webhook`);
-        console.log(`🔗 Redirect: http://localhost:${PORT}/r`);
+        console.log(`📡 Webhook: ${publicUrl}/webhook`);
+        console.log(`🔗 Redirect: ${publicUrl}/r`);
     } catch (err) {
         app.log.error(err);
         process.exit(1);

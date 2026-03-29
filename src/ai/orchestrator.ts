@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type, Part } from '@google/genai';
-import { sendTextMessage, downloadMedia, type WhatsAppMessage } from '../lib/whatsapp.js';
+import { sendTextMessage, downloadMedia, sendInteractiveButtons, sendListMessage, sendCTAUrlMessage, type WhatsAppMessage } from '../lib/whatsapp.js';
+import { detectarEstadoPorWhatsApp } from '../lib/location.js';
 import {
     buscarOfertasPorRegiao,
     analisarHistoricoPreco,
@@ -10,8 +11,12 @@ import {
     ingerirCatalogo,
     obterEstatisticasLoja,
 } from './skills.js';
+import { supabase } from '../lib/supabase.js';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+
+// Função utilitária para delay
+const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
 // ============================================================
 // As tools (Skills)
@@ -21,15 +26,16 @@ const toolsUsuario = [
         functionDeclarations: [
             {
                 name: 'buscar_ofertas_por_regiao',
-                description: 'Busca produtos no catálogo filtrando por cidade, bairro e termo de busca. Retorna apenas lojas com saldo de cliques > 0.',
+                description: 'Busca produtos no catálogo filtrando por cidade, bairro, estado e termo de busca. Retorna apenas lojas com saldo de cliques > 0.',
                 parameters: {
                     type: Type.OBJECT,
                     properties: {
                         cidade: { type: Type.STRING, description: 'Cidade do usuário' },
                         bairro: { type: Type.STRING, description: 'Bairro do usuário' },
+                        estado: { type: Type.STRING, description: 'Estado (UF) do usuário, ex: "PA", "SP"' },
                         query: { type: Type.STRING, description: 'Termo de busca, ex: "arroz 5kg"' },
                     } as Record<string, { type: Type; description?: string }>,
-                    required: ['cidade', 'bairro', 'query'],
+                    required: ['cidade', 'bairro', 'estado', 'query'],
                 },
             },
             {
@@ -52,27 +58,29 @@ const toolsUsuario = [
                     type: Type.OBJECT,
                     properties: {
                         loja_id: { type: Type.STRING },
-                        usuario_id: { type: Type.STRING },
+                        usuario_id: { type: Type.STRING, description: 'ID Único (UUID) do usuário retornado pelo perfil. NUNCA use o número do WhatsApp aqui.' },
                         produto_nome: { type: Type.STRING },
                         preco: { type: Type.NUMBER },
+                        bairro: { type: Type.STRING },
                         faz_delivery: { type: Type.BOOLEAN },
                         whatsapp_loja: { type: Type.STRING },
                     } as Record<string, { type: Type; description?: string }>,
-                    required: ['loja_id', 'usuario_id', 'produto_nome', 'preco', 'faz_delivery', 'whatsapp_loja'],
+                    required: ['loja_id', 'usuario_id', 'produto_nome', 'preco', 'bairro', 'faz_delivery', 'whatsapp_loja'],
                 },
             },
             {
                 name: 'cadastrar_atualizar_usuario',
-                description: 'Cria o usuário na primeira interação ou atualiza cidade/bairro.',
+                description: 'Cria o usuário na primeira interação ou atualiza nome, cidade, bairro e estado.',
                 parameters: {
                     type: Type.OBJECT,
                     properties: {
                         whatsapp: { type: Type.STRING },
-                        nome: { type: Type.STRING },
+                        nome: { type: Type.STRING, description: 'Nome real do consumidor' },
                         cidade: { type: Type.STRING },
                         bairro: { type: Type.STRING },
+                        estado: { type: Type.STRING, description: 'Estado (UF) ex: "PA"' },
                     } as Record<string, { type: Type; description?: string }>,
-                    required: ['whatsapp', 'cidade', 'bairro'],
+                    required: ['whatsapp', 'nome', 'cidade', 'bairro', 'estado'],
                 },
             },
             {
@@ -159,33 +167,48 @@ async function executarSkill(name: string, args: Record<string, unknown>) {
 export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     const from = msg.from;
     const loja = await obterPerfilLoja({ whatsapp: from });
+    const estadoSugerido = detectarEstadoPorWhatsApp(from);
 
     const isLojista = !!loja;
     const tools = isLojista ? toolsLojista : toolsUsuario;
 
+    // 1. Busca perfil do usuário ANTES para injetar no Prompt
+    const perfil = !isLojista ? await obterPerfilUsuario({ whatsapp: from }) : null;
+
     const SYSTEM_PROMPT = isLojista
         ? `Você é o AchaZap (Portal do Lojista). Você está falando com o gestor da loja '${loja.nome}' (ID: ${loja.id}).
-O lojista pode:
-1. Enviar anexos (Planilhas, Fotos, Áudios) de preços -> Chame ingerir_catalogo.
-2. Perguntar sobre o desempenho, saldo ou cliques da loja -> Chame obter_estatisticas_loja.
-Seja extremamente profissional, use termos como "Performance", "Engajamento" e "Retorno sobre Investimento".
-Ao mostrar o ranking de produtos, use emojis de medalha (🥇, 🥈, 🥉) para gerar valor.`
-        : `Você é o AchaZap, o maior buscador de ofertas locais do WhatsApp.
-REGRAS CRÍTICAS DE NEGÓCIOS (LEAD CEGO):
-1. NUNCA revele o nome ou o endereço exato da loja na sua resposta em texto.
-2. Diga apenas o Bairro da loja e o preço encontrado. Ex: "Encontrei no Umarizal por R$ 20,00".
-3. VERIFIQUE o campo "faz_delivery" retornado na busca para adaptar sua resposta:
-   - Se faz_delivery=true: Diga "Clique no link abaixo para ver qual é a loja e já pedir pelo WhatsApp para entregarem ou separarem o seu!"
-   - Se faz_delivery=false: Diga "Clique no link abaixo para descobrir qual é o mercado e garantir essa oferta física antes que o estoque acabe."
-4. Sempre chame gerar_link_redirecionamento() para criar o link magico e entregue-o ao usuário para "revelar a loja" e garantir o repasse.
-5. Sempre chame obter_perfil_usuario() no primeiro Oi para obter cidade/bairro.`;
+Seja profissional.`
+        : `Você é o AchaZap, buscador de ofertas locais.
+INFORMAÇÃO GEOGRÁFICA: Estado sugerido: ${estadoSugerido ?? 'Não identificado'}.
+PERFIL: ${perfil ? `Nome: ${perfil.nome}, Cidade: ${perfil.cidade}, Bairro: ${perfil.bairro}, Estado: ${perfil.estado}` : 'NÃO CADASTRADO'}.
+
+COMANDOS DE SISTEMA (PRIORIDADE MÁXIMA):
+1. Se o perfil acima existir, NUNCA peça nome/cidade.
+2. É TERMINANTEMENTE PROIBIDO escrever URLs, links ou strings com ".com", ".br", "http" ou "www" no seu texto. 
+3. Para CADA produto retornado em 'buscar_ofertas_por_regiao', você DEVE obrigatoriamente chamar 'gerar_link_redirecionamento'.
+4. Sua resposta final deve ser curtíssima (máximo 8 palavras). EXEMPLO: "Encontrei estas ofertas em Castanheira:".
+
+REGRAS:
+- Se não houver perfil, peça educadamente.
+- NUNCA mostre o nome da loja no texto.
+- Se não encontrar nada, sugira outro termo.`;
 
     // Processar conteúdo e mídias
     let payloadParts: Part[] = [];
 
     // Adiciona o texto principal
-    const userText = msg.text?.body ? `[WhatsApp: ${from}]\nMensagem: ${msg.text.body}` : `[WhatsApp: ${from}]`;
-    payloadParts.push({ text: userText });
+    const userMessageText = msg.text?.body || (msg.type === 'interactive' ? msg.interactive?.button_reply?.title : '');
+    const userTextForAI = userMessageText ? `[WhatsApp: ${from}]\nMensagem: ${userMessageText}` : `[WhatsApp: ${from}]`;
+    payloadParts.push({ text: userTextForAI });
+
+    // Salva a mensagem do usuário no banco (se houver texto)
+    if (userMessageText) {
+        await supabase.from('historico_mensagens').insert({
+            whatsapp: from,
+            role: 'user',
+            content: userMessageText
+        });
+    }
 
     // Lida com anexos/mídia
     if (msg.type === 'document' && msg.document) {
@@ -207,6 +230,8 @@ REGRAS CRÍTICAS DE NEGÓCIOS (LEAD CEGO):
 
     let response = await chat.sendMessage({ message: payloadParts });
 
+    let redirectOptions: any[] = [];
+
     // Loop de Function Calling
     while (true) {
         const functionCalls = response.functionCalls ?? [];
@@ -214,20 +239,59 @@ REGRAS CRÍTICAS DE NEGÓCIOS (LEAD CEGO):
         if (functionCalls.length === 0) {
             const finalText = response.text;
             console.log(`[Gemini] Resposta final gerada:`, finalText);
-            if (finalText) {
+
+            if (redirectOptions.length > 0) {
+                // Efeito Vitrine: Enviar mensagens individuais com link direto (CTA URL)
+                if (finalText) {
+                    await sendTextMessage(from, finalText);
+                    await delay(800);
+                }
+
+                // Limita a vitrine aos Top 5 para não ser spam
+                const vitrine = redirectOptions.slice(0, 5);
+
+                for (const opt of vitrine) {
+                    const shortLink = `${process.env.BASE_URL}/r?token=${opt.token}`;
+                    // O WhatsApp obriga ter um texto no body. Usaremos o emoji e o nome do produto para contexto.
+                    const vitrineText = `📦 ${opt.produto_nome}`;
+                    const buttonText = `R$ ${opt.preco.toFixed(2)} - Ver Loja`;
+                    
+                    await sendCTAUrlMessage(from, vitrineText, buttonText, shortLink);
+                    
+                    // Pequeno delay para garantir ordem e evitar rate limit da Meta
+                    await delay(800);
+                }
+            } else if (finalText) {
+                // Resposta padrão (sem ofertas)
+                // Salva a resposta da IA no histórico
+                await supabase.from('historico_mensagens').insert({
+                    whatsapp: from,
+                    role: 'model',
+                    content: finalText
+                });
+
                 console.log(`[WhatsApp] Disparando sendTextMessage para ${from}...`);
                 await sendTextMessage(from, finalText);
                 console.log(`[WhatsApp] Mensagem enviada fisicamente para a Meta sem falhas!`);
-            } else {
-                console.log(`[Aviso] O Gemini retornou texto VAZIO e o Axios não foi chamado.`);
             }
             break;
         }
 
         const functionResponses = await Promise.all(
             functionCalls.map(async (fc) => {
+                // Segurança: Se for geração de link e tivermos o perfil, garante o uso do UUID (ID) correto
+                if (fc.name === 'gerar_link_redirecionamento' && perfil?.id) {
+                    (fc.args as any).usuario_id = perfil.id;
+                }
+
                 console.log(`[Gemini] Chamando skill: ${fc.name}`, fc.args);
                 const result = await executarSkill(fc.name!, fc.args as Record<string, unknown>);
+                
+                // Coleta dados de redirecionamento para agrupar depois
+                if (fc.name === 'gerar_link_redirecionamento') {
+                    redirectOptions.push({ ...result, ...fc.args });
+                }
+
                 return { name: fc.name!, response: { result } };
             })
         );

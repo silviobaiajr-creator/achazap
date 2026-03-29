@@ -37,6 +37,117 @@ export async function sendTextMessage(to: string, text: string): Promise<void> {
     }
 }
 
+/**
+ * Envia botões interativos (limite de 3).
+ */
+export async function sendInteractiveButtons(to: string, bodyText: string, buttons: { id: string, title: string }[]): Promise<void> {
+    if (ACCESS_TOKEN.startsWith('EAAxxxxx') || !ACCESS_TOKEN) {
+        console.log(`\n📱 [SIMULADOR BOTÕES] Enviado para ${to}: ${bodyText}`);
+        buttons.forEach(b => console.log(`   [Botão: ${b.title} (ID: ${b.id})]`));
+        return;
+    }
+
+    try {
+        await axios.post(
+            `${BASE_URL}/${PHONE_NUMBER_ID}/messages`,
+            {
+                messaging_product: 'whatsapp',
+                to,
+                type: 'interactive',
+                interactive: {
+                    type: 'button',
+                    body: { text: bodyText },
+                    action: {
+                        buttons: buttons.map(b => ({
+                            type: 'reply',
+                            reply: { id: b.id, title: b.title.substring(0, 20) }
+                        }))
+                    }
+                }
+            },
+            {
+                headers: { Authorization: `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+            }
+        );
+    } catch (error: any) {
+        console.error('❌ Erro enviando botões:', error?.response?.data || error.message);
+    }
+}
+
+/**
+ * Envia uma lista interativa (limite de 10 itens).
+ */
+export async function sendListMessage(to: string, bodyText: string, buttonLabel: string, sections: { title: string, rows: { id: string, title: string, description?: string }[] }[]): Promise<void> {
+    if (ACCESS_TOKEN.startsWith('EAAxxxxx') || !ACCESS_TOKEN) {
+        console.log(`\n📱 [SIMULADOR LISTA] Enviado para ${to}: ${bodyText}`);
+        return;
+    }
+
+    try {
+        await axios.post(
+            `${BASE_URL}/${PHONE_NUMBER_ID}/messages`,
+            {
+                messaging_product: 'whatsapp',
+                to,
+                type: 'interactive',
+                interactive: {
+                    type: 'list',
+                    body: { text: bodyText },
+                    action: {
+                        button: buttonLabel.substring(0, 20),
+                        sections
+                    }
+                }
+            },
+            {
+                headers: { Authorization: `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+            }
+        );
+    } catch (error: any) {
+        console.error('❌ Erro enviando lista:', error?.response?.data || error.message);
+    }
+}
+
+/**
+ * Envia um botão interativo de Link Direto (Call to Action URL).
+ * Permite 1-click para a loja.
+ */
+export async function sendCTAUrlMessage(to: string, bodyText: string, buttonText: string, url: string): Promise<void> {
+    if (ACCESS_TOKEN.startsWith('EAAxxxxx') || !ACCESS_TOKEN) {
+        console.log(`\n📱 [SIMULADOR CTA] Enviado para ${to}: ${bodyText}`);
+        console.log(`   [Botão URL: ${buttonText} -> ${url}]`);
+        return;
+    }
+
+    try {
+        await axios.post(
+            `${BASE_URL}/${PHONE_NUMBER_ID}/messages`,
+            {
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to,
+                type: 'interactive',
+                interactive: {
+                    type: 'cta_url',
+                    body: { text: bodyText },
+                    action: {
+                        name: 'cta_url',
+                        parameters: {
+                            display_text: buttonText.substring(0, 20),
+                            url: url
+                        }
+                    }
+                }
+            },
+            {
+                headers: { Authorization: `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+            }
+        );
+    } catch (error: any) {
+        console.error('❌ Erro enviando CTA URL:', error?.response?.data || error.message);
+    }
+}
+
 
 /**
  * Retorna a URL segura de download da mídia a partir do media_id.
@@ -82,6 +193,11 @@ export type WhatsAppMessage = {
     image?: { id: string; mime_type: string; caption?: string };
     audio?: { id: string; mime_type: string };
     document?: { id: string; filename: string; mime_type: string };
+    interactive?: {
+        type: 'button_reply' | 'list_reply';
+        button_reply?: { id: string; title: string };
+        list_reply?: { id: string; title: string; description?: string };
+    };
     timestamp: string;
 };
 
@@ -105,6 +221,7 @@ export function extractMessage(body: unknown): WhatsAppMessage | null {
             image: msg.image as WhatsAppMessage['image'],
             audio: msg.audio as WhatsAppMessage['audio'],
             document: msg.document as WhatsAppMessage['document'],
+            interactive: msg.interactive as WhatsAppMessage['interactive'],
             timestamp: msg.timestamp as string,
         };
     } catch {

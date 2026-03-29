@@ -69,17 +69,17 @@ export function buildServer() {
     // GET /r — Endpoint de redirect de cliques
     // Debita 1 clique da loja e redireciona para o WhatsApp
     // ============================================================
-    app.get<{ Querystring: { token: string; wa: string } }>('/r', async (request, reply) => {
-        const { token, wa } = request.query;
+    app.get<{ Querystring: { token: string } }>('/r', async (request, reply) => {
+        const { token } = request.query;
 
-        if (!token || !wa) {
-            return reply.status(400).send({ error: 'Parâmetros inválidos' });
+        if (!token) {
+            return reply.status(400).send({ error: 'Token inválido' });
         }
 
         // Busca o registro pendente no banco
         const { data: registro, error } = await supabase
             .from('cliques_consumidos')
-            .select('id, loja_id, usuario_id, produto_ref, debitado, consumido_em')
+            .select('id, loja_id, usuario_id, produto_ref, debitado, link_gerado, consumido_em')
             .eq('link_token', token)
             .single();
 
@@ -87,7 +87,12 @@ export function buildServer() {
             return reply.status(404).send({ error: 'Link inválido ou expirado' });
         }
 
-        // Deduplicação: mesmo user + loja + produto nas últimas 1 hora
+        // Se já foi debitado, apenas redireciona (evita débito duplicado se clicar 2x no mesmo link)
+        if (registro.debitado) {
+            return reply.redirect(registro.link_gerado, 302);
+        }
+
+        // Deduplicação Global: mesmo user + loja + produto nas últimas 1 hora
         const umaHoraAtras = new Date(Date.now() - 60 * 60 * 1000).toISOString();
         const { count } = await supabase
             .from('cliques_consumidos')
@@ -98,19 +103,20 @@ export function buildServer() {
             .eq('debitado', true)
             .gte('consumido_em', umaHoraAtras);
 
-        const jaDebitado = (count ?? 0) > 0;
+        const jaDebitadoRecentemente = (count ?? 0) > 0;
 
         // Atualiza o registro para marcar como debitado (ou skip)
+        // Isso dispara a trigger no banco que decrementa o saldo da loja
         await supabase
             .from('cliques_consumidos')
             .update({
-                debitado: !jaDebitado,
-                motivo_skip: jaDebitado ? 'deduplicacao' : null,
+                debitado: !jaDebitadoRecentemente,
+                motivo_skip: jaDebitadoRecentemente ? 'deduplicacao' : null,
             })
             .eq('id', registro.id);
 
         // Redireciona para o WhatsApp da loja
-        return reply.redirect(decodeURIComponent(wa), 302);
+        return reply.redirect(registro.link_gerado, 302);
     });
 
     // ============================================================
