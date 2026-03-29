@@ -77,6 +77,15 @@ INSERT INTO pacotes_cliques (loja_id, quantidade, preco_pago, nota_fiscal_ref, c
 -- Em produção real, os triggers calculam o saldo automaticamente.
 
 -- =============================================================
+-- OFERTAS DE DESCONTO (para teste)
+-- =============================================================
+INSERT INTO ofertas_desconto (loja_id, valor_minimo, percentual, validade, produto_filtro) VALUES
+  -- Supermercado Cambuí: 10% off acima de R$300 (qualquer produto)
+  ('11111111-0000-0000-0000-000000000001', 300.00, 10.00, now() + interval '30 days', NULL),
+  -- Farmácia Saúde Total: 15% off acima de R$200 em medicamentos
+  ('11111111-0000-0000-0000-000000000002', 200.00, 15.00, now() + interval '15 days', 'dipirona');
+
+-- =============================================================
 -- Verificação rápida pós-seed
 -- =============================================================
 SELECT

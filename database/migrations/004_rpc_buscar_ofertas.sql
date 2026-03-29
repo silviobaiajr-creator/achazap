@@ -1,12 +1,12 @@
--- =============================================================
--- AchaZap — Migration 004: Função RPC buscar_ofertas
--- =============================================================
--- Usada pela skill buscarOfertasPorRegiao via supabase.rpc('buscar_ofertas', ...)
--- Retorna o preço MAIS RECENTE de cada produto por loja, filtrando por região.
+-- 1. Limpar versões antigas/fantasmas para evitar o erro de duplicidade
+DROP FUNCTION IF EXISTS buscar_ofertas(text, text, text);
+DROP FUNCTION IF EXISTS buscar_ofertas(text, text, text, text);
 
+-- 2. Garantir que as extensões de texto estão ativas
 CREATE EXTENSION IF NOT EXISTS unaccent;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
+-- 3. Criar a nova versão blindada
 CREATE OR REPLACE FUNCTION buscar_ofertas(
   p_cidade TEXT,
   p_bairro TEXT,
@@ -48,21 +48,19 @@ AS $$
       AND l.ativa       = true
       AND ch.disponivel = true
       AND (
-        -- 1. Busca exata/insensível (unaccent + ilike)
         extensions.unaccent(ch.produto_nome) ILIKE extensions.unaccent('%' || p_query || '%')
-        -- 2. Busca fuzzy (para erros de digitação leves)
         OR extensions.similarity(extensions.unaccent(ch.produto_nome), extensions.unaccent(p_query)) > 0.3
-        -- 3. Fallback textual simples
         OR to_tsvector('portuguese', extensions.unaccent(ch.produto_nome)) @@ websearch_to_tsquery('portuguese', extensions.unaccent(p_query))
       )
     ORDER BY
       ch.loja_id,
       LOWER(TRIM(extensions.unaccent(ch.produto_nome))),
-      ch.preco ASC, -- <--- REGRA DE OURO: O MENOR preço é SEMPRE o vencedor
+      ch.preco ASC, 
       ch.registrado_em DESC
   ) sub
   ORDER BY preco_atual ASC;
 $$;
 
-COMMENT ON FUNCTION buscar_ofertas IS
-  'Busca o preço mais recente de cada produto por loja, filtrando por cidade/bairro e full-text search. Exclui lojas sem saldo.';
+-- 4. Adicionar o comentário especificando exatamente os 4 parâmetros
+COMMENT ON FUNCTION buscar_ofertas(TEXT, TEXT, TEXT, TEXT) IS
+  'Busca o preço mais recente de cada produto por loja, filtrando por região e full-text search.';

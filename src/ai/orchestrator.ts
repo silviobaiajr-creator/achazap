@@ -10,6 +10,9 @@ import {
     obterPerfilLoja,
     ingerirCatalogo,
     obterEstatisticasLoja,
+    cadastrarOfertaDesconto,
+    buscarOfertasDesconto,
+    buscarOfertasProdutoComDesconto,
 } from './skills.js';
 import { supabase } from '../lib/supabase.js';
 
@@ -136,6 +139,43 @@ const toolsLojista = [
                     required: ['loja_id'],
                 },
             },
+            {
+                name: 'cadastrar_oferta_desconto',
+                description: 'Cadastra uma oferta de desconto por ticket mínimo. Ex: compre acima de R$500 e ganhe 10% off.',
+                parameters: {
+                    type: Type.OBJECT,
+                    properties: {
+                        loja_id: { type: Type.STRING },
+                        valor_minimo: { type: Type.NUMBER, description: 'Valor mínimo da compra para ganhar o desconto (ex: 500)' },
+                        percentual: { type: Type.NUMBER, description: 'Percentual de desconto (ex: 10)' },
+                        validade: { type: Type.STRING, description: 'Data de validade da oferta (formato: YYYY-MM-DD)' },
+                        produto_filtro: { type: Type.STRING, description: 'Opcional: produto específico que a oferta se aplica (ex: "arroz"). Se vazio, aplica a toda a loja.' },
+                    } as Record<string, { type: Type; description?: string }>,
+                    required: ['loja_id', 'valor_minimo', 'percentual', 'validade'],
+                },
+            },
+        ],
+    },
+];
+
+const toolsBuscaDesconto = [
+    {
+        functionDeclarations: [
+            {
+                name: 'buscar_ofertas_desconto',
+                description: 'Busca lojas que têm ofertas de desconto por ticket mínimo (ex: compre R$500 e ganhe 10% off).',
+                parameters: {
+                    type: Type.OBJECT,
+                    properties: {
+                        cidade: { type: Type.STRING },
+                        bairro: { type: Type.STRING },
+                        estado: { type: Type.STRING },
+                        percentual_minimo: { type: Type.NUMBER, description: 'Opcional: mínimo de percentual de desconto (ex: 10)' },
+                        produto: { type: Type.STRING, description: 'Opcional: produto específico que a oferta deve cobrir' },
+                    } as Record<string, { type: Type; description?: string }>,
+                    required: ['cidade', 'bairro', 'estado'],
+                },
+            },
         ],
     },
 ];
@@ -156,6 +196,10 @@ async function executarSkill(name: string, args: Record<string, unknown>) {
             return ingerirCatalogo(args as any);
         case 'obter_estatisticas_loja':
             return obterEstatisticasLoja(args as any);
+        case 'cadastrar_oferta_desconto':
+            return cadastrarOfertaDesconto(args as any);
+        case 'buscar_ofertas_desconto':
+            return buscarOfertasDesconto(args as any);
         default:
             throw new Error(`Skill desconhecida: ${name}`);
     }
@@ -170,7 +214,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     const estadoSugerido = detectarEstadoPorWhatsApp(from);
 
     const isLojista = !!loja;
-    const tools = isLojista ? toolsLojista : toolsUsuario;
+    const tools = isLojista ? toolsLojista : [...toolsUsuario, ...toolsBuscaDesconto];
 
     // 1. Busca perfil do usuário ANTES para injetar no Prompt
     const perfil = !isLojista ? await obterPerfilUsuario({ whatsapp: from }) : null;
@@ -186,7 +230,13 @@ COMANDOS DE SISTEMA (PRIORIDADE MÁXIMA):
 1. Se o perfil acima existir, NUNCA peça nome/cidade.
 2. É TERMINANTEMENTE PROIBIDO escrever URLs, links ou strings com ".com", ".br", "http" ou "www" no seu texto. 
 3. Para CADA produto retornado em 'buscar_ofertas_por_regiao', você DEVE obrigatoriamente chamar 'gerar_link_redirecionamento'.
-4. Sua resposta final deve ser curtíssima (máximo 8 palavras). EXEMPLO: "Encontrei estas ofertas em Castanheira:".
+4. SUA RESPOSTA DE TEXTO DEVE SER CURTÍSSIMA - NO MÁXIMO 8 PALAVRAS! Exemplo: "Encontrei estas ofertas em Castanheira:".
+   - Os produtos com preço e link SERÃO ENVIADOS AUTOMATICAMENTE em botões. NÃO inclua preços, nomes de lojas ou detalhes nos produtos na sua resposta de texto.
+   - Apenas a frase introdutória!
+
+BUSCA DE DESCONTOS:
+- Se o usuário buscar "oferta com desconto", "desconto", "promoção" ou similares, use 'buscar_ofertas_desconto'.
+- Se o usuário buscar um produto específico (ex: "arroz"), use 'buscar_ofertas_por_regiao' normalmente - a oferta de desconto da loja já aparece junto automaticamente.
 
 REGRAS:
 - Se não houver perfil, peça educadamente.
@@ -247,7 +297,8 @@ REGRAS:
                     await delay(800);
                 }
 
-                // Limita a vitrine aos Top 5 para não ser spam
+                // Ordena do menor para o maior preço, depois limita aos Top 5
+                redirectOptions.sort((a, b) => a.preco - b.preco);
                 const vitrine = redirectOptions.slice(0, 5);
 
                 for (const opt of vitrine) {

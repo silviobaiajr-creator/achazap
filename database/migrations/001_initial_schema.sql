@@ -8,6 +8,9 @@
 -- Garante que a extensão uuid está ativa (padrão no Supabase)
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
+-- Extensão para busca insensitive a acentos
+CREATE EXTENSION IF NOT EXISTS "unaccent";
+
 -- =============================================================
 -- TABELA: lojas
 -- =============================================================

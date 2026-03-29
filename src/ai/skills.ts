@@ -10,8 +10,7 @@ export async function buscarOfertasPorRegiao(args: {
     estado: string;
     query: string;
 }) {
-    // Busca o produto mais recente de cada loja disponível na região
-    const { data, error } = await supabase.rpc('buscar_ofertas', {
+    const { data: produtos, error } = await supabase.rpc('buscar_ofertas', {
         p_cidade: args.cidade,
         p_bairro: args.bairro,
         p_estado: args.estado,
@@ -19,8 +18,44 @@ export async function buscarOfertasPorRegiao(args: {
     });
 
     if (error) throw new Error(`buscar_ofertas: ${error.message}`);
-    console.log(`[Skills] buscarOfertas retornou ${data?.length || 0} itens para "${args.query}" em ${args.bairro}/${args.cidade}`);
-    return data ?? [];
+    console.log(`[Skills] buscarOfertas retornou ${produtos?.length || 0} itens para "${args.query}" em ${args.bairro}/${args.cidade}`);
+
+    if (!produtos || produtos.length === 0) return [];
+
+    const lojaIds = [...new Set(produtos.map((p: any) => p.loja_id))];
+
+    const { data: ofertas } = await supabase
+        .from('ofertas_desconto')
+        .select('*')
+        .in('loja_id', lojaIds)
+        .eq('ativa', true)
+        .gte('validade', new Date().toISOString());
+
+    const ofertasMap = new Map(ofertas?.map(o => [o.loja_id, o]) || []);
+
+    const resultado = produtos.map((produto: any) => {
+        const oferta = ofertasMap.get(produto.loja_id);
+        let temDesconto = false;
+
+        if (oferta) {
+            if (!oferta.produto_filtro) {
+                temDesconto = true;
+            } else if (produto.produto_nome.toLowerCase().includes(oferta.produto_filtro.toLowerCase())) {
+                temDesconto = true;
+            }
+        }
+
+        return {
+            ...produto,
+            oferta_desconto: temDesconto ? {
+                valor_minimo: oferta.valor_minimo,
+                percentual: oferta.percentual,
+                produto_filtro: oferta.produto_filtro,
+            } : null,
+        };
+    });
+
+    return resultado;
 }
 
 // ============================================================
@@ -105,24 +140,26 @@ export async function cadastrarAtualizarUsuario(args: {
     bairro: string;
     estado: string;
 }) {
+    const whatsappNormalizado = '+' + args.whatsapp.replace(/\D/g, '');
+    
     const { data: existente } = await supabase
         .from('usuarios')
         .select('id')
-        .eq('whatsapp', args.whatsapp)
+        .eq('whatsapp', whatsappNormalizado)
         .single();
 
     if (existente) {
         await supabase
             .from('usuarios')
             .update({ cidade: args.cidade, bairro: args.bairro, estado: args.estado, nome: args.nome })
-            .eq('whatsapp', args.whatsapp);
+            .eq('whatsapp', whatsappNormalizado);
         return { usuario_id: existente.id, novo_cadastro: false };
     }
 
     const { data, error } = await supabase
         .from('usuarios')
         .insert({ 
-            whatsapp: args.whatsapp, 
+            whatsapp: whatsappNormalizado, 
             nome: args.nome, 
             cidade: args.cidade, 
             bairro: args.bairro,
@@ -139,10 +176,11 @@ export async function cadastrarAtualizarUsuario(args: {
 // SKILL: obter_perfil_usuario
 // ============================================================
 export async function obterPerfilUsuario(args: { whatsapp: string }) {
+    const whatsappNormalizado = args.whatsapp.replace(/\D/g, '');
     const { data } = await supabase
         .from('usuarios')
         .select('id, nome, cidade, bairro, estado')
-        .eq('whatsapp', args.whatsapp)
+        .eq('whatsapp', '+' + whatsappNormalizado)
         .single();
 
     if (data) {
@@ -157,10 +195,12 @@ export async function obterPerfilUsuario(args: { whatsapp: string }) {
 // SKILL: obter_perfil_loja
 // ============================================================
 export async function obterPerfilLoja(args: { whatsapp: string }) {
+    const whatsappNormalizado = args.whatsapp.replace(/\D/g, '');
+    
     const { data } = await supabase
         .from('lojas')
         .select('id, nome, cidade, bairro, estado, saldo_cliques, ativa')
-        .eq('whatsapp', args.whatsapp)
+        .eq('whatsapp', '+' + whatsappNormalizado)
         .single();
 
     return data ?? null;
@@ -240,4 +280,153 @@ export async function obterEstatisticasLoja(args: { loja_id: string }) {
         cliques_30d: cliquesTotal || 0,
         ranking_top_3: top3
     };
+}
+
+// ============================================================
+// SKILL: cadastrar_oferta_desconto
+// ============================================================
+export async function cadastrarOfertaDesconto(args: {
+    loja_id: string;
+    valor_minimo: number;
+    percentual: number;
+    validade: string;
+    produto_filtro?: string;
+}) {
+    const { error } = await supabase.from('ofertas_desconto').insert({
+        loja_id: args.loja_id,
+        valor_minimo: args.valor_minimo,
+        percentual: args.percentual,
+        validade: args.validade,
+        produto_filtro: args.produto_filtro || null,
+    });
+
+    if (error) throw new Error(`cadastrar_oferta_desconto: ${error.message}`);
+
+    return { sucesso: true, mensagem: `Oferta criada! Compre acima de R$${args.valor_minimo} e ganhe ${args.percentual}% off${args.produto_filtro ? ' em ' + args.produto_filtro : ''} até ${args.validade}` };
+}
+
+// ============================================================
+// SKILL: buscar_ofertas_desconto
+// ============================================================
+export async function buscarOfertasDesconto(args: {
+    cidade: string;
+    bairro: string;
+    estado: string;
+    percentual_minimo?: number;
+    produto?: string;
+}) {
+    let query = supabase
+        .from('ofertas_desconto')
+        .select(`
+            valor_minimo,
+            percentual,
+            validade,
+            produto_filtro,
+            loja:lojas(id, nome, whatsapp, bairro, cidade, faz_delivery)
+        `)
+        .eq('ativa', true)
+        .gte('validade', new Date().toISOString());
+
+    if (args.percentual_minimo) {
+        query = query.gte('percentual', args.percentual_minimo);
+    }
+
+    if (args.produto) {
+        query = query.or(`produto_filtro.is.null,produto_filtro.ilike.%${args.produto}%`);
+    }
+
+    const { data, error } = await supabase
+        .from('lojas')
+        .select('id, nome, bairro, cidade, whatsapp, faz_delivery')
+        .eq('ativa', true)
+        .eq('cidade', args.cidade)
+        .eq('bairro', args.bairro);
+
+    if (error) throw new Error(`buscar_ofertas_desconto: ${error.message}`);
+
+    const lojaIds = data?.map(l => l.id) || [];
+    const { data: ofertas } = await supabase
+        .from('ofertas_desconto')
+        .select('*')
+        .in('loja_id', lojaIds)
+        .eq('ativa', true)
+        .gte('validade', new Date().toISOString());
+
+    if (!ofertas || ofertas.length === 0) return [];
+
+    const resultado = await Promise.all(
+        ofertas.map(async (o) => {
+            const loja = data?.find(l => l.id === o.loja_id);
+            if (!loja) return null;
+
+            if (args.percentual_minimo && o.percentual < args.percentual_minimo) return null;
+            if (args.produto && o.produto_filtro && !args.produto.toLowerCase().includes(o.produto_filtro.toLowerCase())) return null;
+
+            return {
+                loja_id: o.loja_id,
+                loja_nome: loja.nome,
+                whatsapp_loja: loja.whatsapp,
+                faz_delivery: loja.faz_delivery,
+                valor_minimo: o.valor_minimo,
+                percentual: o.percentual,
+                produto_filtro: o.produto_filtro,
+                validade: o.validade,
+            };
+        })
+    );
+
+    return resultado.filter(Boolean);
+}
+
+// ============================================================
+// SKILL: buscar_ofertas_produto_com_desconto
+// ============================================================
+export async function buscarOfertasProdutoComDesconto(args: {
+    cidade: string;
+    bairro: string;
+    estado: string;
+    query: string;
+}) {
+    const { data: produtos, error } = await supabase.rpc('buscar_ofertas', {
+        p_cidade: args.cidade,
+        p_bairro: args.bairro,
+        p_estado: args.estado,
+        p_query: args.query,
+    });
+
+    if (error) throw new Error(`buscar_ofertas: ${error.message}`);
+    if (!produtos || produtos.length === 0) return [];
+
+    const lojaIds = [...new Set(produtos.map((p: any) => p.loja_id))];
+
+    const { data: ofertas } = await supabase
+        .from('ofertas_desconto')
+        .select('*')
+        .in('loja_id', lojaIds)
+        .eq('ativa', true)
+        .gte('validade', new Date().toISOString());
+
+    const ofertasMap = new Map(ofertas?.map(o => [o.loja_id, o]) || []);
+
+    return produtos.map((produto: any) => {
+        const oferta = ofertasMap.get(produto.loja_id);
+        let temDesconto = false;
+
+        if (oferta) {
+            if (!oferta.produto_filtro) {
+                temDesconto = true;
+            } else if (produto.produto_nome.toLowerCase().includes(oferta.produto_filtro.toLowerCase())) {
+                temDesconto = true;
+            }
+        }
+
+        return {
+            ...produto,
+            oferta_desconto: temDesconto ? {
+                valor_minimo: oferta.valor_minimo,
+                percentual: oferta.percentual,
+                produto_filtro: oferta.produto_filtro,
+            } : null,
+        };
+    });
 }
