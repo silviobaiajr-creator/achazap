@@ -177,11 +177,22 @@ export async function cadastrarAtualizarUsuario(args: {
 // ============================================================
 export async function obterPerfilUsuario(args: { whatsapp: string }) {
     const whatsappNormalizado = args.whatsapp.replace(/\D/g, '');
-    const { data } = await supabase
+    
+    // Tenta primeiro com +
+    let { data } = await supabase
         .from('usuarios')
         .select('id, nome, cidade, bairro, estado')
         .eq('whatsapp', '+' + whatsappNormalizado)
         .single();
+
+    // Se não encontrou, tenta sem +
+    if (!data) {
+        ({ data } = await supabase
+            .from('usuarios')
+            .select('id, nome, cidade, bairro, estado')
+            .eq('whatsapp', whatsappNormalizado)
+            .single());
+    }
 
     if (data) {
         console.log(`[Skills] Perfil encontrado para ${args.whatsapp}:`, data.nome, data.cidade);
@@ -197,11 +208,21 @@ export async function obterPerfilUsuario(args: { whatsapp: string }) {
 export async function obterPerfilLoja(args: { whatsapp: string }) {
     const whatsappNormalizado = args.whatsapp.replace(/\D/g, '');
     
-    const { data } = await supabase
+    // Tenta primeiro com + (padrão E.164)
+    let { data } = await supabase
         .from('lojas')
         .select('id, nome, cidade, bairro, estado, saldo_cliques, ativa')
         .eq('whatsapp', '+' + whatsappNormalizado)
         .single();
+
+    // Se não encontrou, tenta sem +
+    if (!data) {
+        ({ data } = await supabase
+            .from('lojas')
+            .select('id, nome, cidade, bairro, estado, saldo_cliques, ativa')
+            .eq('whatsapp', whatsappNormalizado)
+            .single());
+    }
 
     return data ?? null;
 }
