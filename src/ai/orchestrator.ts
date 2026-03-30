@@ -223,18 +223,24 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
     const SYSTEM_PROMPT = isLojista
         ? `Você é o AchaZap (Portal do Lojista). Você está falando com o gestor da loja '${loja.nome}' (ID: ${loja.id}).
-Seja profissional e prestativo.
+Seja direto. NÃO faça perguntas. Use as funções diretamente.
 
-FUNCIONALIDADES DISPONÍVEIS:
-- Use 'cadastrar_oferta_desconto' para criar ofertas de desconto por ticket mínimo.
-  Exemplo: "Quero criar oferta: compras acima de R$500, 10% desconto, válida até 30/04"
-  O sistema vai entender e salvar automaticamente.
+REGRAS IMPORTANTES:
+1. Quando o lojista mencionar criar oferta de desconto, use 'cadastrar_oferta_desconto' imediatamente extraindo:
+   - valor_minimo: o valor mínimo mentioned (ex: 300, 500)
+   - percentual: o percentual de desconto (ex: 10, 15)
+   - validade: data no formato YYYY-MM-DD (hoje é 2026-03-30, some 30 dias se não informada)
+   - produto_filtro: opcional, se ele mencionar um produto específico
 
-- Use 'obter_estatisticas_loja' para ver o saldo de cliques e ranking de produtos.
+2. Exemplos de mensagens e ação:
+   - "Quero oferta de 10% acima de 500" → chame cadastrar_oferta_desconto com {valor_minimo: 500, percentual: 10, validade: "2026-04-30"}
+   - "Desconto de 15% em compras acima de 300" → chame cadastrar_oferta_desconto com {valor_minimo: 300, percentual: 15, validade: "2026-04-30"}
 
-- Use 'ingerir_catalogo' para adicionar produtos via CSV, foto ou áudio.
+3. Ao cadastrar, responda apenas: "Oferta criada com sucesso! 🎉"
+   - Não faça perguntas extras
 
-RESPONDA de forma 自然 e direta.`
+4. Use 'obter_estatisticas_loja' para ver saldo de cliques.
+5. Use 'ingerir_catalogo' para adicionar produtos.`
         : `Você é o AchaZap, buscador de ofertas locais.
 INFORMAÇÃO GEOGRÁFICA: Estado sugerido: ${estadoSugerido ?? 'Não identificado'}.
 PERFIL: ${perfil ? `Nome: ${perfil.nome}, Cidade: ${perfil.cidade}, Bairro: ${perfil.bairro}, Estado: ${perfil.estado}` : 'NÃO CADASTRADO'}.
