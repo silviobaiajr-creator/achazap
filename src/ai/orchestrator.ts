@@ -210,7 +210,9 @@ async function executarSkill(name: string, args: Record<string, unknown>) {
 // ============================================================
 export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     const from = msg.from;
+    console.log(`[Debug] Mensagem de: ${from}`);
     const loja = await obterPerfilLoja({ whatsapp: from });
+    console.log(`[Debug] Loja encontrada:`, loja);
     const estadoSugerido = detectarEstadoPorWhatsApp(from);
 
     const isLojista = !!loja;
@@ -221,7 +223,18 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
     const SYSTEM_PROMPT = isLojista
         ? `Você é o AchaZap (Portal do Lojista). Você está falando com o gestor da loja '${loja.nome}' (ID: ${loja.id}).
-Seja profissional.`
+Seja profissional e prestativo.
+
+FUNCIONALIDADES DISPONÍVEIS:
+- Use 'cadastrar_oferta_desconto' para criar ofertas de desconto por ticket mínimo.
+  Exemplo: "Quero criar oferta: compras acima de R$500, 10% desconto, válida até 30/04"
+  O sistema vai entender e salvar automaticamente.
+
+- Use 'obter_estatisticas_loja' para ver o saldo de cliques e ranking de produtos.
+
+- Use 'ingerir_catalogo' para adicionar produtos via CSV, foto ou áudio.
+
+RESPONDA de forma 自然 e direta.`
         : `Você é o AchaZap, buscador de ofertas locais.
 INFORMAÇÃO GEOGRÁFICA: Estado sugerido: ${estadoSugerido ?? 'Não identificado'}.
 PERFIL: ${perfil ? `Nome: ${perfil.nome}, Cidade: ${perfil.cidade}, Bairro: ${perfil.bairro}, Estado: ${perfil.estado}` : 'NÃO CADASTRADO'}.
