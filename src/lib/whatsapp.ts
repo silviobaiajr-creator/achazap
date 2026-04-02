@@ -188,11 +188,12 @@ export async function downloadMedia(mediaId: string): Promise<Buffer> {
  */
 export type WhatsAppMessage = {
     from: string;        // número do remetente (ex: "5511999999999")
-    type: 'text' | 'image' | 'audio' | 'document' | 'interactive';
+    type: 'text' | 'image' | 'audio' | 'document' | 'interactive' | 'sticker';
     text?: { body: string };
     image?: { id: string; mime_type: string; caption?: string };
     audio?: { id: string; mime_type: string };
     document?: { id: string; filename: string; mime_type: string };
+    sticker?: { id: string; mime_type: string };
     interactive?: {
         type: 'button_reply' | 'list_reply';
         button_reply?: { id: string; title: string };
@@ -221,6 +222,7 @@ export function extractMessage(body: unknown): WhatsAppMessage | null {
             image: msg.image as WhatsAppMessage['image'],
             audio: msg.audio as WhatsAppMessage['audio'],
             document: msg.document as WhatsAppMessage['document'],
+            sticker: msg.sticker as WhatsAppMessage['sticker'],
             interactive: msg.interactive as WhatsAppMessage['interactive'],
             timestamp: msg.timestamp as string,
         };

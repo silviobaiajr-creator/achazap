@@ -1,9 +1,10 @@
 import 'dotenv/config';
 import Fastify from 'fastify';
 import { createHmac } from 'crypto';
-import { messageQueue } from './queue/messageQueue.js';
 import { extractMessage } from './lib/whatsapp.js';
 import { supabase } from './lib/supabase.js';
+import { getRedisCloudClient, verificarConexao } from './lib/redis-cloud.js';
+import { processMessage } from './ai/orchestrator.js';
 
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN!;
 const APP_SECRET = process.env.WHATSAPP_APP_SECRET ?? '';  // para validação HMAC
@@ -54,14 +55,17 @@ export function buildServer() {
         // Responde 200 imediatamente (Meta exige resposta em < 5s)
         reply.status(200).send({ status: 'ok' });
 
-        // Extrai a mensagem e enfileira para processamento assíncrono
+        // Extrai a mensagem e processa diretamente
         const msg = extractMessage(request.body);
         if (msg) {
-            await messageQueue.add('process', msg, {
-                attempts: 3,
-                backoff: { type: 'exponential', delay: 2000 },
-            });
-            app.log.info(`[Webhook] Mensagem de ${msg.from} enfileirada`);
+            app.log.info(`[Webhook] Mensagem de ${msg.from} recebida - processando...`);
+            
+            try {
+                await processMessage(msg);
+                app.log.info(`[Webhook] Mensagem de ${msg.from} processada com sucesso`);
+            } catch (error) {
+                app.log.error(error, `[Webhook] Erro ao processar mensagem de ${msg.from}`);
+            }
         }
     });
 
@@ -122,7 +126,10 @@ export function buildServer() {
     // ============================================================
     // GET /health — Health check
     // ============================================================
-    app.get('/health', async () => ({ status: 'ok', ts: new Date().toISOString() }));
+    app.get('/health', async () => { 
+        const redisOk = await verificarConexao();
+        return { status: 'ok', ts: new Date().toISOString(), redis: redisOk ? 'ok' : 'error' };
+    });
 
     return app;
 }

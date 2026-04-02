@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import { buildServer } from './server.js';
-import { messageWorker } from './processor/messageProcessor.js';
 
 const PORT = Number(process.env.PORT ?? 3000);
 
@@ -21,7 +20,6 @@ async function main() {
     // Graceful shutdown
     const shutdown = async () => {
         console.log('\n⚠️  Encerrando servidor...');
-        await messageWorker.close();
         await app.close();
         process.exit(0);
     };
