@@ -1,40 +1,46 @@
 import { Redis } from 'ioredis';
 
-let redisCloudClient: Redis | null = null;
+// ============================================================
+// Singleton unificado — usa REDIS_URL tanto para estado
+// de conversas quanto para o BullMQ (sem split-brain)
+// ============================================================
 
-export function createRedisCloudClient(): Redis {
-    const url = process.env.REDIS_CLOUD_URL;
-
-    if (!url) {
-        console.warn('[Redis Cloud] ⚠️ REDIS_CLOUD_URL não definida. Usando Redis local.');
-        return new Redis({
-            host: 'localhost',
-            port: 6379,
-            lazyConnect: true,
-        });
-    }
-
-    const isTLS = url.startsWith('rediss://');
-
-    return new Redis(url, {
-        maxRetriesPerRequest: 3,
-        retryStrategy: (times: number) => {
-            if (times > 3) {
-                console.error('[Redis Cloud] ❌ Máximo de tentativas excedido');
-                return null;
-            }
-            return Math.min(times * 200, 2000);
-        },
-        enableReadyCheck: true,
-        ...(isTLS ? { tls: {} } : {}),
-    });
-}
+let redisClient: Redis | null = null;
 
 export function getRedisCloudClient(): Redis {
-    if (!redisCloudClient) {
-        redisCloudClient = createRedisCloudClient();
+    if (!redisClient) {
+        const url = process.env.REDIS_URL;
+
+        if (!url) {
+            console.warn('[Redis] ⚠️ REDIS_URL não definida. Usando Redis local (fallback dev).');
+            redisClient = new Redis({
+                host: 'localhost',
+                port: 6379,
+                lazyConnect: true,
+                maxRetriesPerRequest: 3,
+            });
+        } else {
+            const isTLS = url.startsWith('rediss://');
+            redisClient = new Redis(url, {
+                maxRetriesPerRequest: 3,
+                retryStrategy: (times: number) => {
+                    if (times > 5) {
+                        console.error('[Redis] ❌ Máximo de tentativas excedido — Redis indisponível');
+                        return null; // para de tentar, não derruba o processo
+                    }
+                    return Math.min(times * 300, 3000);
+                },
+                enableReadyCheck: true,
+                ...(isTLS ? { tls: {} } : {}),
+            });
+
+            redisClient.on('error', (err) => {
+                // Evita crash por UnhandledError — apenas loga
+                console.error('[Redis] ❌ Erro de conexão:', err.message);
+            });
+        }
     }
-    return redisCloudClient;
+    return redisClient;
 }
 
 export async function obterRedis(): Promise<Redis> {
@@ -45,92 +51,115 @@ export async function obterRedis(): Promise<Redis> {
 // Funções de Estado da Conversa (Máquina de Estados)
 // ============================================================
 
-const ESTADO_PREFIX = 'estado:';
-const TTL_SEGUNDOS = 3600; // 1 hora
+const TTL_CONTEXTO = 1800; // 30 minutos (estado ativo)
+const TTL_WAMID    = 300;  // 5 minutos (idempotência de mensagem)
 
-export interface EstadoContexto {
-    step: string;
-    dados: Record<string, any>;
-}
-
-export async function salvarEstado(whatsapp: string, estado: string, dadosExtras: any = null): Promise<void> {
+/**
+ * Idempotência de mensagens da Meta.
+ * Retorna true se já foi processada (duplicata), false se é nova.
+ */
+export async function marcarWamidProcessado(wamid: string): Promise<boolean> {
     const client = getRedisCloudClient();
-    const chave = `${ESTADO_PREFIX}${whatsapp}`;
-    
-    let dadosAtuais: Record<string, any> = {};
-    
-    // Se já existirem dados, mantemos eles para manter continuidade (CENÁRIO 10)
-    const estadoExistente = await client.get(chave);
-    if (estadoExistente) {
-        try {
-            const partes = estadoExistente.split('|');
-            if (partes.length > 1) {
-                dadosAtuais = JSON.parse(partes[1]);
-            }
-        } catch (e) {
-            // Ignora erro de parsing, começa do zero
-        }
-    }
-
-    // Faz merge dos dados novos com os existentes
-    if (dadosExtras) {
-        dadosAtuais = { ...dadosAtuais, ...dadosExtras };
-    }
-
-    const conteudo = dadosAtuais ? `${estado}|${JSON.stringify(dadosAtuais)}` : estado;
-
     try {
-        await client.setex(chave, TTL_SEGUNDOS, conteudo);
-        console.log(`[Redis Cloud] 💾 Estado salvo: ${whatsapp} -> ${estado} (TTL: ${TTL_SEGUNDOS}s)`, dadosAtuais);
-    } catch (error) {
-        console.error(`[Redis Cloud] ❌ Erro ao salvar estado: ${error}`);
-        throw error;
+        // SET NX: só grava se ainda não existir. Retorna 'OK' ou null.
+        const resultado = await client.set(`wam:${wamid}`, '1', 'EX', TTL_WAMID, 'NX');
+        return resultado === null; // null = já existia = é duplicata
+    } catch (err) {
+        console.error('[Redis] ❌ Erro ao verificar wamid:', err);
+        return false; // em caso de falha no Redis, permite processar (fail-open)
     }
 }
 
-export async function lerEstado(whatsapp: string): Promise<{ estado: string | null, dados: any | null }> {
+/**
+ * Salva contexto completo da conversa (substitui salvarEstado legado).
+ */
+export async function salvarContexto(whatsapp: string, contexto: Record<string, any>): Promise<void> {
     const client = getRedisCloudClient();
-    const chave = `${ESTADO_PREFIX}${whatsapp}`;
-
     try {
-        const resultado = await client.get(chave);
-        
-        if (!resultado) {
-            return { estado: null, dados: null };
-        }
-
-        // Separa o step dos dados
-        const partes = resultado.split('|');
-        const estado = partes[0];
-        const dados = partes.length > 1 ? JSON.parse(partes[1]) : null;
-
-        return { estado, dados };
-    } catch (error) {
-        console.error(`[Redis Cloud] ❌ Erro ao ler estado: ${error}`);
-        return { estado: null, dados: null };
+        await client.set(`ctx:${whatsapp}`, JSON.stringify(contexto), 'EX', TTL_CONTEXTO);
+    } catch (err) {
+        console.error('[Redis] ❌ Erro ao salvar contexto:', err);
+        // Não relança — falha do Redis não derruba o fluxo
     }
 }
 
-export async function limparEstado(whatsapp: string): Promise<void> {
+/**
+ * Lê contexto da conversa. Retorna null se não existir ou Redis falhar.
+ */
+export async function lerContexto(whatsapp: string): Promise<Record<string, any> | null> {
     const client = getRedisCloudClient();
-    const chave = `${ESTADO_PREFIX}${whatsapp}`;
-
     try {
-        await client.del(chave);
-        console.log(`[Redis Cloud] 🧹 Estado limpo: ${whatsapp}`);
-    } catch (error) {
-        console.error(`[Redis Cloud] ❌ Erro ao limpar estado: ${error}`);
+        const raw = await client.get(`ctx:${whatsapp}`);
+        return raw ? JSON.parse(raw) : null;
+    } catch (err) {
+        console.error('[Redis] ❌ Erro ao ler contexto:', err);
+        return null;
     }
+}
+
+/**
+ * Remove contexto (volta para IDLE).
+ */
+export async function limparContexto(whatsapp: string): Promise<void> {
+    const client = getRedisCloudClient();
+    try {
+        await client.del(`ctx:${whatsapp}`);
+    } catch (err) {
+        console.error('[Redis] ❌ Erro ao limpar contexto:', err);
+    }
+}
+
+/**
+ * Renova TTL do contexto sem alterar os dados (preserva estado em erros de validação).
+ */
+export async function renovarTTLContexto(whatsapp: string): Promise<void> {
+    const client = getRedisCloudClient();
+    try {
+        await client.expire(`ctx:${whatsapp}`, TTL_CONTEXTO);
+    } catch (err) {
+        console.error('[Redis] ❌ Erro ao renovar TTL:', err);
+    }
+}
+
+/**
+ * Lock de concorrência (mutex simples com NX).
+ * Retorna true se conseguiu o lock, false se já estava bloqueado.
+ */
+export async function adquirirLock(chave: string, ttlSegundos: number = 10): Promise<boolean> {
+    const client = getRedisCloudClient();
+    try {
+        const resultado = await client.set(`lock:${chave}`, '1', 'EX', ttlSegundos, 'NX');
+        return resultado === 'OK';
+    } catch (err) {
+        console.error('[Redis] ❌ Erro ao adquirir lock:', err);
+        return false; // fail-open: não bloqueia o fluxo se Redis falhar
+    }
+}
+
+/**
+ * Libera lock de concorrência.
+ */
+export async function liberarLock(chave: string): Promise<void> {
+    const client = getRedisCloudClient();
+    try {
+        await client.del(`lock:${chave}`);
+    } catch (err) {
+        console.error('[Redis] ❌ Erro ao liberar lock:', err);
+    }
+}
+
+// Aliases legados para compatibilidade com server.ts e index.ts
+export const lerEstado = lerContexto;
+export const limparEstado = limparContexto;
+export async function salvarEstado(whatsapp: string, estado: string, dados: any = null): Promise<void> {
+    await salvarContexto(whatsapp, { estado, ...(dados ?? {}) });
 }
 
 export async function verificarConexao(): Promise<boolean> {
     try {
-        const client = getRedisCloudClient();
-        await client.ping();
-        console.log(`[Redis Cloud] ✅ Conexão estabelecida`);
+        await getRedisCloudClient().ping();
         return true;
-    } catch (error) {
-        console.error(`[Redis Cloud] ❌ Erro na conexão: ${error}`);
+    } catch {
         return false;
     }
 }

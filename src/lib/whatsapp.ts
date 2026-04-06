@@ -9,31 +9,57 @@ const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN!;
  */
 export async function sendTextMessage(to: string, text: string): Promise<void> {
     if (ACCESS_TOKEN.startsWith('EAAxxxxx') || !ACCESS_TOKEN) {
-        console.log(`\\n📱 [SIMULADOR WHATSAPP] Mensagem enviada para ${to}:`);
-        console.log(`\\x1b[36m${text}\\x1b[0m\\n`);
+        console.log(`\n📱 [SIMULADOR WHATSAPP] Mensagem enviada para ${to}:`);
+        console.log(`\x1b[36m${text}\x1b[0m\n`);
         return;
     }
 
-    try {
-        await axios.post(
-            `${BASE_URL}/${PHONE_NUMBER_ID}/messages`,
-            {
-                messaging_product: 'whatsapp',
-                recipient_type: 'individual',
-                to,
-                type: 'text',
-                text: { body: text },
-            },
-            {
-                headers: {
-                    Authorization: `Bearer ${ACCESS_TOKEN}`,
-                    'Content-Type': 'application/json',
+    const MAX_TENTATIVAS = 3;
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+        try {
+            await axios.post(
+                `${BASE_URL}/${PHONE_NUMBER_ID}/messages`,
+                {
+                    messaging_product: 'whatsapp',
+                    recipient_type: 'individual',
+                    to,
+                    type: 'text',
+                    text: { body: text },
                 },
+                {
+                    headers: {
+                        Authorization: `Bearer ${ACCESS_TOKEN}`,
+                        'Content-Type': 'application/json',
+                    },
+                }
+            );
+            return; // sucesso — sai do loop
+        } catch (error: any) {
+            const status = error?.response?.status;
+
+            // Sprint 1 #12: usuário bloqueou o bot — não tentar novamente
+            if (status === 403) {
+                console.error(`❌ [WhatsApp 403] Usuário ${to} bloqueou o bot. Registrar inatividade.`);
+                try {
+                    const { createClient: getSupabase } = await import('@supabase/supabase-js');
+                    const sb = getSupabase(process.env.SUPABASE_URL!, process.env.SUPABASE_SECRET_KEY!);
+                    await sb.from('lojas').update({ ativa: false }).eq('whatsapp', to);
+                } catch { /* ignora falha ao registrar */ }
+                return; // encerra sem re-lançar
             }
-        );
-    } catch (error: any) {
-        console.error('❌ Erro real na API do WhatsApp:', error?.response?.data || error.message);
-        throw error;
+
+            // Sprint 1 #13: rate limit — espera exponencial e tenta novamente
+            if (status === 429) {
+                const wait = Math.pow(2, tentativa) * 1000; // 2s, 4s, 8s
+                console.warn(`⚠️ [WhatsApp 429] Rate limit para ${to}. Aguardando ${wait}ms (tentativa ${tentativa}/${MAX_TENTATIVAS})`);
+                await new Promise(r => setTimeout(r, wait));
+                continue;
+            }
+
+            // Outros erros: loga e re-lança
+            console.error('❌ Erro na API do WhatsApp:', error?.response?.data || error.message);
+            if (tentativa === MAX_TENTATIVAS) throw error;
+        }
     }
 }
 
@@ -184,20 +210,25 @@ export async function downloadMedia(mediaId: string): Promise<Buffer> {
 }
 
 /**
- * Tipos de mensagem que o webhook pode receber.
+ * Tipos de mensagem que o webhook pode receber (cobertura completa da Meta API).
  */
 export type WhatsAppMessage = {
-    from: string;        // número do remetente (ex: "5511999999999")
-    type: 'text' | 'image' | 'audio' | 'document' | 'interactive' | 'sticker';
-    text?: { body: string };
-    image?: { id: string; mime_type: string; caption?: string };
-    audio?: { id: string; mime_type: string };
-    document?: { id: string; filename: string; mime_type: string };
-    sticker?: { id: string; mime_type: string };
+    from: string;
+    type: 'text' | 'image' | 'audio' | 'video' | 'document' |
+          'interactive' | 'sticker' | 'location' | 'contacts' | 'reaction';
+    text?:        { body: string };
+    image?:       { id: string; mime_type: string; file_size?: number; caption?: string };
+    audio?:       { id: string; mime_type: string; file_size?: number };
+    video?:       { id: string; mime_type: string; file_size?: number };
+    document?:    { id: string; filename: string; mime_type: string };
+    sticker?:     { id: string; mime_type: string };
+    location?:    { latitude: number; longitude: number; name?: string; address?: string };
+    contacts?:    Array<{ name: { formatted_name: string } }>;
+    reaction?:    { message_id: string; emoji: string };
     interactive?: {
         type: 'button_reply' | 'list_reply';
         button_reply?: { id: string; title: string };
-        list_reply?: { id: string; title: string; description?: string };
+        list_reply?:   { id: string; title: string; description?: string };
     };
     timestamp: string;
 };

@@ -2,39 +2,40 @@ import { Worker, Job } from 'bullmq';
 import { createClient } from '../queue/redisClient.js';
 import { processMessage } from '../ai/orchestrator.js';
 import type { WhatsAppMessage } from '../lib/whatsapp.js';
+import { logger } from '../lib/logger.js';
 
 const connection = createClient();
 
-
 /**
  * Worker responsável por processar as mensagens da fila "messages".
- * Ele chama o orquestrador de IA (Gemini) para cada nova mensagem.
+ * Chama o orquestrador de IA (Gemini) para cada nova mensagem.
+ * concurrency: 5 → até 5 conversas simultâneas
+ * limiter: 10/s → respeita rate limit da API Gemini
  */
 export const messageWorker = new Worker<WhatsAppMessage>(
     'messages',
     async (job: Job<WhatsAppMessage>) => {
-        console.log(`[Processor] Iniciando processamento do job ${job.id} de ${job.data.from}`);
+        logger.info({ jobId: job.id, from: job.data.from, type: job.data.type }, '[Processor] Iniciando job');
         await processMessage(job.data);
     },
     {
         connection,
-        concurrency: 5,        // Processa até 5 mensagens simultâneas
+        concurrency: 5,
         limiter: {
             max: 10,
-            duration: 1000,    // Limite de 10 mensagens por segundo (respeitando API do Gemini)
+            duration: 1000,
         },
     }
 );
 
-// Monitoramento de eventos do Worker
 messageWorker.on('failed', (job, err) => {
-    console.error(`[Processor] ❌ Job ${job?.id} falhou:`, err.message);
+    logger.error({ jobId: job?.id, from: job?.data?.from, err: err.message }, '[Processor] Job falhou');
 });
 
 messageWorker.on('completed', (job) => {
-    console.log(`[Processor] ✅ Job ${job.id} concluído com sucesso para ${job.data.from}`);
+    logger.info({ jobId: job.id, from: job.data.from }, '[Processor] Job concluído');
 });
 
 messageWorker.on('active', (job) => {
-    console.log(`[Processor] ⚡ Job ${job.id} agora está ATIVO`);
+    logger.debug({ jobId: job.id, from: job.data.from }, '[Processor] Job ativo');
 });
