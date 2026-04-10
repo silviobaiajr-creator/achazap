@@ -612,13 +612,14 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     }
 
     // ══════════════════════════════════════════════════════════
-    // CONFIRMAÇÃO DE ALTERAÇÕES PLANEJADAS (novo fluxo com resumo comparativo)
-    // ═══════════════════════════════════════════════════════════��════
+    // CONFIRMAÇÃO DE ALTERAÇÕES PLANEJADAS (com edição individual)
+    // ════════════════════════════════════════════════════════════════
     if (contexto.estado === EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES) {
         const alteracoes = contexto.alteracoesPlanejadas ?? [];
         
         const confirmou = isInteractive && buttonId === 'confirmar_alteracoes_sim';
         const cancelou  = isInteractive && buttonId === 'confirmar_alteracoes_nao';
+        const editar   = isInteractive && buttonId === 'editar_item_lista';
         
         if (confirmou) {
             if (alteracoes.length === 0) {
@@ -655,6 +656,15 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             return;
         }
         
+        if (editar) {
+            await salvarContexto(from, {
+                ...contexto,
+                estado: EstadosFluxo.AGUARDANDO_SELECAO_EDICAO,
+            });
+            await sendTextMessage(from, `Digite o *NÚMERO* do item que deseja editar:\n(Exemplo: digite "2" para editar o segundo item)`);
+            return;
+        }
+        
         if (cancelou) {
             await sendTextMessage(from, '❌ Alterações canceladas. Nada foi salvo.');
             await limparContexto(from);
@@ -663,9 +673,99 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             return;
         }
         
-        await sendInteractiveButtons(from, `Confirme as alterações acima:`, [
-            { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar' },
-            { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar' },
+        await sendInteractiveButtons(from, `⚡ Confirma as alterações acima?`, [
+            { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar Todos' },
+            { id: 'editar_item_lista', title: '✏️ Editar um Item' },
+            { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar Tudo' },
+        ]);
+        return;
+    }
+    
+    // ════════════════════════════════════════════════════════════════════════
+    // FLUXO: Lojista escolhe número para editar
+    // ════════════════════════════════════════════════════════════════
+    if (contexto.estado === EstadosFluxo.AGUARDANDO_SELECAO_EDICAO) {
+        const lista = contexto.alteracoesPlanejadas ?? [];
+        const numeroDigitado = parseInt(userMessageText.trim(), 10);
+        
+        if (isNaN(numeroDigitado) || numeroDigitado < 1 || numeroDigitado > lista.length) {
+            await sendTextMessage(from, `⚠️ Número inválido. Digite um número entre *1* e *${lista.length}*.`);
+            return;
+        }
+        
+        const indiceReal = numeroDigitado - 1;
+        const itemEscolhido = lista[indiceReal];
+        
+        await salvarContexto(from, {
+            ...contexto,
+            estado: EstadosFluxo.AGUARDANDO_NOVO_PRECO_EDICAO,
+            acao: indiceReal.toString(),
+        });
+        
+        await sendTextMessage(from, 
+            `Você escolheu: *${itemEscolhido.nome}*\nPreço na lista: R$ ${itemEscolhido.precoFoto.toFixed(2).replace('.', ',')}\n\n👉 Digite o *NOVO PREÇO* ou digite *0* para excluir este item:`
+        );
+        return;
+    }
+    
+    // ═��══════════════════════════════════════════════════════════════
+    // FLUXO: Lojista digita novo preço ou 0 para excluir
+    // ════════════════════════════════════════════════════════════════
+    if (contexto.estado === EstadosFluxo.AGUARDANDO_NOVO_PRECO_EDICAO) {
+        const lista = contexto.alteracoesPlanejadas ?? [];
+        const indiceReal = parseInt(contexto.acao ?? '0', 10);
+        
+        const precoLimpo = userMessageText.replace(',', '.').replace(/[^\d.]/g, '');
+        const novoPreco = parseFloat(precoLimpo);
+        
+        if (isNaN(novoPreco) || novoPreco < 0) {
+            await sendTextMessage(from, '⚠️ Valor inválido. Digite um número como "9,50", ou "0" para excluir o item.');
+            return;
+        }
+        
+        let mensagemFeedback = '';
+        
+        if (novoPreco === 0) {
+            lista.splice(indiceReal, 1);
+            
+            if (lista.length === 0) {
+                await sendTextMessage(from, '🗑️ Você removeu todos os itens da lista. A operação foi cancelada.');
+                await limparContexto(from);
+                await delay(400);
+                await enviarMenu(loja.nome, from);
+                return;
+            }
+            mensagemFeedback = '🗑️ Item removido com sucesso!';
+        } else {
+            lista[indiceReal].precoFoto = novoPreco;
+            
+            if (lista[indiceReal].produtoExistente && lista[indiceReal].produtoExistente.preco === novoPreco) {
+                lista[indiceReal].acao = 'sem_alteracao';
+            } else if (lista[indiceReal].produtoExistente) {
+                lista[indiceReal].acao = 'preco_atualizado';
+            }
+            mensagemFeedback = '✅ Preço corrigido!';
+        }
+        
+        await salvarContexto(from, {
+            ...contexto,
+            estado: EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES,
+            alteracoesPlanejadas: lista,
+            acao: undefined,
+        });
+        
+        let novoResumo = `📋 *Resumo atualizado:*\n\n`;
+        lista.forEach((item, i) => {
+            const simbolo = item.acao === 'novo_cadastro' ? '✅' : item.acao === 'preco_atualizado' ? '🔄' : '⏭️';
+            novoResumo += `${i + 1}. ${item.nome} → R$ ${item.precoFoto.toFixed(2).replace('.', ',')} ${simbolo}\n`;
+        });
+        
+        await sendTextMessage(from, `${mensagemFeedback}\n\n${novoResumo}`);
+        await delay(300);
+        await sendInteractiveButtons(from, `O que deseja fazer agora?`, [
+            { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar Todos' },
+            { id: 'editar_item_lista', title: '✏️ Editar outro' },
+            { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar Tudo' },
         ]);
         return;
     }
@@ -754,9 +854,10 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             
             await sendTextMessage(from, resumo);
             await delay(300);
-            await sendInteractiveButtons(from, `⏭️ Confirma as alterações acima?`, [
-                { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar' },
-                { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar' },
+            await sendInteractiveButtons(from, `⚡ Confirma as alterações acima?`, [
+                { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar Todos' },
+                { id: 'editar_item_lista', title: '✏️ Editar um Item' },
+                { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar Tudo' },
             ]);
             return;
         }
@@ -1156,8 +1257,9 @@ JSON:`;
         await sendTextMessage(from, resumo);
         await delay(300);
         await sendInteractiveButtons(from, `⚡ Confirma as alterações acima?`, [
-            { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar' },
-            { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar' },
+            { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar Todos' },
+            { id: 'editar_item_lista', title: '✏️ Editar um Item' },
+            { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar Tudo' },
         ]);
 
 
