@@ -14,7 +14,7 @@ import {
     renovarTTLContexto,
     adquirirLock,
     liberarLock,
-    getRedisCloudClient,
+    cache,
 } from '../lib/redis-cloud.js';
 import { supabase } from '../lib/supabase.js';
 import { EstadosFluxo } from './types.js';
@@ -29,8 +29,8 @@ import {
     parseSafe,
 } from './schemas.js';
 
-const ai          = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-const GEMINI_MODEL = 'gemini-2.5-flash';
+import { ai, GEMINI_MODEL } from '../lib/gemini.js';
+
 const delay        = (ms: number) => new Promise(res => setTimeout(res, ms));
 
 // ============================================================
@@ -58,6 +58,18 @@ interface ContextoSessao {
     termoBusca?: string;
     similaresEncontrados?: Array<{ id: string; produto_nome: string; preco: number; unidade: string }>;
     retries?: number;  // Sprint 10: contador anti-loop
+    itensPendenteConfirmacao?: Array<DadosProduto>; // produtos extraídos de foto/áudio aguardando OK do lojista
+    alteracoesPlanejadas?: Array<AlteracaoPlanejada>; // resumo comparativo antes de confirmar
+}
+
+type TipoAlteracao = 'novo_cadastro' | 'preco_atualizado' | 'sem_alteracao';
+
+interface AlteracaoPlanejada {
+    nome: string;
+    precoFoto: number;
+    unidade: string;
+    acao: TipoAlteracao;
+    produtoExistente?: { id: string; produto_nome: string; preco: number; unidade: string };
 }
 
 // ============================================================
@@ -105,12 +117,11 @@ async function enviarMenu(lojaNome: string, from: string): Promise<void> {
 // PERFIL DA LOJA (com cache Redis — C1)
 // ============================================================
 async function buscarPerfilLoja(whatsapp: string) {
-    const redis = getRedisCloudClient();
     const cacheKey = `loja:${whatsapp}`;
 
     try {
-        const cached = await redis.get(cacheKey);
-        if (cached) return JSON.parse(cached);
+        const cached = cache.get(cacheKey);
+        if (cached) return cached;
     } catch { /* ignora falha de cache */ }
 
     const whatsappNormalizado = whatsapp.replace(/\D/g, '');
@@ -128,7 +139,7 @@ async function buscarPerfilLoja(whatsapp: string) {
     }
 
     if (data) {
-        try { await redis.set(cacheKey, JSON.stringify(data), 'EX', 300); } catch { /* ignora */ }
+        try { cache.set(cacheKey, data, 300 * 1000); } catch { /* ignora */ }
     }
     return data ?? null;
 }
@@ -158,13 +169,16 @@ async function verificarFugaGlobal(
     }
 
     // Nível 2: regex de palavras exatas — custo zero (Sprint 6 #2)
-    if (userText && PALAVRAS_FUGA.test(userText.trim())) {
+    // ATENÇÃO: pular para mensagens interativas dos nossos próprios fluxos de confirmação
+    // (ex: botão "Cancelar" não deve disparar fuga global)
+    const isConfirmacaoInterna = buttonId.startsWith('confirmar_') || buttonId.startsWith('btn_sugestao');
+    if (userText && PALAVRAS_FUGA.test(userText.trim()) && !isConfirmacaoInterna) {
         await executarFuga(from, loja);
         return true;
     }
 
-    // Nível 3: NLP para frases coloquiais (apenas se há contexto ativo)
-    if (temContextoAtivo && userText && userText.length > 3) {
+    // Nível 3: NLP para frases coloquiais (apenas se há contexto ativo E não é botão interno)
+    if (temContextoAtivo && userText && userText.length > 3 && !isConfirmacaoInterna) {
         const ehFuga = await detectarFugaNLP(userText);
         if (ehFuga) {
             await executarFuga(from, loja);
@@ -208,8 +222,8 @@ async function processarDadosProduto(from: string, loja: any, userMessageText: s
 
     // Sprint 2 #1: feedback imediato UX
     try {
-        const redis = getRedisCloudClient();
-        await redis.call('sendReaction', from, '🔍').catch(() => {});  // best-effort
+        // Substitui a reaction pelo próprio sistema nativo quando aplicável ou ignora
+        // await redis.call('sendReaction', from, '🔍').catch(() => {});  // best-effort
     } catch { /* ignora se API não suportar */ }
 
     const prompt = `Você é um extrator estrito de dados de produtos de estoque. NUNCA responda perguntas gerais. NUNCA dê conselhos. Sua única função é extrair Nome, Preço e Unidade de mensagens de lojistas.
@@ -389,8 +403,11 @@ async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: 
         await sendTextMessage(from, listaMsg);
     } else {
         // Sem similares: INSERT direto
-        await ingeriCatalogo(loja.id, produto);
-        await sendTextMessage(from, `✅ Produto *${produto.nome}* (${produto.unidade}) a *R$ ${produto.preco}* cadastrado com sucesso!`);
+        const { inserido } = await ingeriCatalogo(loja.id, produto);
+        const msg = inserido
+            ? `✅ Produto *${produto.nome}* (${produto.unidade}) a *R$ ${produto.preco}* cadastrado com sucesso!`
+            : `⚠️ Produto *${produto.nome}* com o mesmo preço já existe no seu catálogo. Nenhuma alteração foi feita.`;
+        await sendTextMessage(from, msg);
         await limparContexto(from);
         await delay(400);
         await enviarMenu(loja.nome, from);
@@ -424,6 +441,19 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         '';
 
     logger.debug({ from, estado: contexto?.estado ?? 'IDLE', tipo: msg.type, texto: userMessageText || '[media]' }, '[processMessage]');
+
+    // ══════════════════════════════════════════════════════════
+    // INTERCEPTADOR DE CSV (Sprint 14 - Scale_Up)
+    // ══════════════════════════════════════════════════════════
+    if (msg.type === 'document') {
+        const doc = (msg as any).document;
+        if (doc && (doc.mime_type === 'text/csv' || doc?.filename?.endsWith('.csv'))) {
+            await sendTextMessage(from, '⏳ Identifiquei um arquivo CSV! Entrando no modo de extração em lote. Processando...');
+            const { processarCSV } = await import('../processor/csvProcessor.js');
+            await processarCSV(msg, from, loja, contexto);
+            return;
+        }
+    }
 
     // ══════════════════════════════════════════════════════════
     // MIDDLEWARE GLOBAL DE FUGA (Sprint 6) — antes de tudo
@@ -582,9 +612,175 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     }
 
     // ══════════════════════════════════════════════════════════
+    // CONFIRMAÇÃO DE ALTERAÇÕES PLANEJADAS (novo fluxo com resumo comparativo)
+    // ═══════════════════════════════════════════════════════════��════
+    if (contexto.estado === EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES) {
+        const alteracoes = contexto.alteracoesPlanejadas ?? [];
+        
+        const confirmou = isInteractive && buttonId === 'confirmar_alteracoes_sim';
+        const cancelou  = isInteractive && buttonId === 'confirmar_alteracoes_nao';
+        
+        if (confirmou) {
+            if (alteracoes.length === 0) {
+                await sendTextMessage(from, 'Nada a alterar. Tente novamente.');
+                await limparContexto(from);
+                await enviarMenu(loja.nome, from);
+                return;
+            }
+            
+            let inseridos = 0;
+            let atualizados = 0;
+            let duplicatas = 0;
+            
+            for (const alt of alteracoes) {
+                if (alt.acao === 'novo_cadastro') {
+                    await ingeriCatalogo(loja.id, { nome: alt.nome, preco: alt.precoFoto, unidade: alt.unidade }, 'foto');
+                    inseridos++;
+                } else if (alt.acao === 'preco_atualizado' && alt.produtoExistente) {
+                    await atualizarPrecoLedger(loja.id, alt.produtoExistente.produto_nome, alt.precoFoto, alt.unidade || alt.produtoExistente.unidade);
+                    atualizados++;
+                } else {
+                    duplicatas++;
+                }
+            }
+            
+            const partes: string[] = [];
+            if (inseridos > 0)   partes.push(`✅ *${inseridos}* novo(s) cadastrado(s)`);
+            if (atualizados > 0) partes.push(`🔄 *${atualizados}* preço(s) atualizado(s)`);
+            if (duplicatas > 0)  partes.push(`⏭️ *${duplicatas}* sem alteração (mesmo preço)`);
+            await sendTextMessage(from, partes.join('\n'));
+            await limparContexto(from);
+            await delay(400);
+            await enviarMenu(loja.nome, from);
+            return;
+        }
+        
+        if (cancelou) {
+            await sendTextMessage(from, '❌ Alterações canceladas. Nada foi salvo.');
+            await limparContexto(from);
+            await delay(400);
+            await enviarMenu(loja.nome, from);
+            return;
+        }
+        
+        await sendInteractiveButtons(from, `Confirme as alterações acima:`, [
+            { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar' },
+            { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar' },
+        ]);
+        return;
+    }
+
+    // CONFIRMAÇÃO INICIAL DE PRODUTOS EXTRAÍDOS DE FOTO/ÁUDIO
+    // ════════════════════════════════════════════════════════════════
+    if (contexto.estado === EstadosFluxo.AGUARDANDO_CONFIRMACAO_MULTIMODAL) {
+        const itens = contexto.itensPendenteConfirmacao ?? [];
+
+        const confirmou = isInteractive && buttonId === 'confirmar_multimodal_sim';
+        const cancelou  = isInteractive && buttonId === 'confirmar_multimodal_nao';
+
+        if (confirmou) {
+            if (itens.length === 0) {
+                await sendTextMessage(from, 'Não encontrei produtos para salvar. Tente novamente.');
+                await limparContexto(from);
+                await enviarMenu(loja.nome, from);
+                return;
+            }
+            
+            await sendTextMessage(from, `⏳ Verificando *${itens.length}* produto(s) no estoque...`);
+            
+            const alteracoes: AlteracaoPlanejada[] = [];
+            const linhas: string[] = [];
+            
+            for (let i = 0; i < itens.length; i++) {
+                const item = itens[i];
+                if (!item.nome || item.preco <= 0) continue;
+                
+                const similares = await buscarProdutosSimilares(loja.id, item.nome);
+                const alteracao: AlteracaoPlanejada = {
+                    nome: item.nome,
+                    precoFoto: item.preco,
+                    unidade: item.unidade,
+                    acao: 'sem_alteracao',
+                };
+                
+                if (similares.length > 0) {
+                    const maisProximo = similares[0];
+                    alteracao.produtoExistente = {
+                        id: maisProximo.id,
+                        produto_nome: maisProximo.produto_nome,
+                        preco: maisProximo.preco,
+                        unidade: maisProximo.unidade,
+                    };
+                    
+                    if (maisProximo.preco === item.preco) {
+                        alteracao.acao = 'sem_alteracao';
+                        linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ⏭️ Sem alteração`);
+                    } else {
+                        alteracao.acao = 'preco_atualizado';
+                        linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → 🔄 Atualizar`);
+                    }
+                } else {
+                    alteracao.acao = 'novo_cadastro';
+                    linhas.push(`${i + 1}. ${item.nome}\n   Estoque: (não existe) | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ✅ Novo cadastro`);
+                }
+                
+                alteracoes.push(alteracao);
+            }
+            
+            if (alteracoes.length === 0) {
+                await sendTextMessage(from, 'Nenhum produto válido encontrado.');
+                await limparContexto(from);
+                await enviarMenu(loja.nome, from);
+                return;
+            }
+            
+            const linhasAgrupadas = linhas.slice(0, 30).join('\n');
+            const sufixo = linhas.length > 30 ? `\n\n...e mais ${linhas.length - 30} item(s).` : '';
+            const totalNovos = alteracoes.filter(a => a.acao === 'novo_cadastro').length;
+            const totalAtualizar = alteracoes.filter(a => a.acao === 'preco_atualizado').length;
+            const totalIgual = alteracoes.filter(a => a.acao === 'sem_alteracao').length;
+            
+            let resumo = `📋 *Resumo das alterações:*\n\n`;
+            if (totalNovos > 0) resumo += `✅ Novo(s): ${totalNovos}\n`;
+            if (totalAtualizar > 0) resumo += `🔄 Atualizar: ${totalAtualizar}\n`;
+            if (totalIgual > 0) resumo += `⏭️ Sem alteração: ${totalIgual}\n`;
+            resumo += `\n${linhasAgrupadas}${sufixo}`;
+            
+            await salvarContexto(from, {
+                ...contexto,
+                estado: EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES,
+                alteracoesPlanejadas: alteracoes,
+            });
+            
+            await sendTextMessage(from, resumo);
+            await delay(300);
+            await sendInteractiveButtons(from, `⏭️ Confirma as alterações acima?`, [
+                { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar' },
+                { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar' },
+            ]);
+            return;
+        }
+
+        if (cancelou) {
+            await sendTextMessage(from, '❌ Cadastro cancelado. Nada foi salvo.');
+            await limparContexto(from);
+            await delay(400);
+            await enviarMenu(loja.nome, from);
+            return;
+        }
+
+        await sendInteractiveButtons(from, `Confirme: deseja salvar *${itens.length}* produto(s) no catálogo?`, [
+            { id: 'confirmar_multimodal_sim', title: '✅ Salvar todos' },
+            { id: 'confirmar_multimodal_nao', title: '❌ Cancelar' },
+        ]);
+        return;
+    }
+
+    // ══════════════════════════════════════════════════════════
     // CENÁRIO 2/3/10/11: Aguardando dados do produto
     // ══════════════════════════════════════════════════════════
     if (contexto.estado === EstadosFluxo.AGUARDANDO_DADOS_PRODUTO) {
+
         if (!userMessageText.trim() && isMediaOnly) {
             // Sprint 11: Upload de imagem/áudio para extração
             await processarMidia(msg, from, loja, contexto);
@@ -622,13 +818,17 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             // Opção 0: cadastrar novo
             if (opcaoNum === 0) {
                 const produto = contexto.dadosProduto as DadosProduto;
-                await ingeriCatalogo(loja.id, produto);
-                await sendTextMessage(from, `✅ Produto *${produto.nome}* (${produto.unidade}) a *R$ ${produto.preco}* cadastrado com sucesso!`);
+                const { inserido } = await ingeriCatalogo(loja.id, produto);
+                const msgSimilar = inserido
+                    ? `✅ Produto *${produto.nome}* (${produto.unidade}) a *R$ ${produto.preco}* cadastrado com sucesso!`
+                    : `⚠️ Produto *${produto.nome}* com o mesmo preço já existe no catálogo. Nenhuma alteração foi feita.`;
+                await sendTextMessage(from, msgSimilar);
                 await limparContexto(from);
                 await delay(400);
                 await enviarMenu(loja.nome, from);
                 return;
             }
+
 
             // Opção 1..N: produto selecionado
             const prod     = similares[opcaoNum - 1];
@@ -833,16 +1033,18 @@ async function processarMidia(msg: WhatsAppMessage, from: string, loja: any, con
         const buffer = await downloadMedia(mediaInfo.id);
         const base64 = buffer.toString('base64');
 
-        const promptMultimodal = `Você é um extrator de dados de produtos de estoque.
+        const promptMultimodal = `Você é um extrator de dados de catálogo de supermercado/restaurante.
 Analise a imagem/áudio e retorne APENAS um JSON.
+Sua tarefa é extrair TODOS os produtos legíveis e inseri-los no array "itens".
 
 Regras de escape:
-- Se imagem embaçada/ilegível ou áudio inaudível → {"legibilidade_baixa": true}
-- Se há VÁRIOS produtos sem destaque claro → {"multiplos_produtos": true}
-- Se for ruído de fundo (conversa, barulho) → {"ruido_detectado": true}
-- Se conseguiu extrair → {"legibilidade_baixa": false, "multiplos_produtos": false, "ruido_detectado": false, "nome": "X", "preco": 10.50, "unidade": "Y"}
+- Se imagem estiver 100% embaçada/ilegível ou áudio for inaudível/ruído → {"legibilidade_baixa": true, "ruido_detectado": true, "itens": []}
+- Se os dados estiverem visíveis/audíveis, extraia TODOS.
 
 Nome em Title Case. Preço como número. Unidade máx 30 chars.
+Se a unidade não estiver clara, use "un".
+Formato de saída esperado:
+{"legibilidade_baixa": false, "ruido_detectado": false, "itens": [{"nome": "Coca Cola 2L", "preco": 10.50, "unidade": "un"}, {"nome": "Guaraná Antártica", "preco": 8.00, "unidade": "un"}]}
 
 JSON:`;
 
@@ -862,21 +1064,102 @@ JSON:`;
             await renovarTTLContexto(from);
             return;
         }
-        if (dados.multiplos_produtos) {
-            await sendTextMessage(from, '🏪 Vejo vários produtos! Por favor, foque em *apenas uma etiqueta* por vez.');
-            await renovarTTLContexto(from);
-            return;
-        }
-        if (dados.ruido_detectado) {
-            const pendencia = contexto.perguntaPendente || 'Por favor, envie o Nome, Preço e Unidade do produto.';
-            await sendTextMessage(from, `Não sei sobre isso! 😅 Sou treinado apenas para organizar a sua loja.\n\n${pendencia}`);
+        if (dados.ruido_detectado || !('itens' in dados) || !dados.itens || dados.itens.length === 0) {
+            const pendencia = contexto.perguntaPendente || 'Por favor, envie o Nome, Preço e Unidade do(s) produto(s).';
+            await sendTextMessage(from, `Não encontrei produtos válidos na mídia. 😅\n\n${pendencia}`);
             await renovarTTLContexto(from);
             return;
         }
 
-        // Sprint 11 #5: engate com Sprint 2 (peneira de similares)
-        const texto = `${dados.nome || ''} ${dados.preco || ''} ${dados.unidade || ''}`.trim();
-        await processarDadosProduto(from, loja, texto, { ...contexto, dadosProduto: dados });
+        // Monta preview dos produtos extraídos para confirmação do lojista
+        const itensValidos: DadosProduto[] = dados.itens
+            .filter((i: any) => i.nome && i.preco > 0)
+            .map((i: any) => ({
+                nome: String(i.nome).substring(0, 250),
+                preco: i.preco as number,
+                unidade: String(i.unidade || 'un').substring(0, 30),
+            }));
+
+        if (itensValidos.length === 0) {
+            await sendTextMessage(from, 'Nenhum produto válido foi encontrado na mídia. 😅');
+            await renovarTTLContexto(from);
+            return;
+        }
+
+        await sendTextMessage(from, `⏳ Verificando *${itensValidos.length}* produto(s) no estoque...`);
+
+        const alteracoes: AlteracaoPlanejada[] = [];
+        const linhas: string[] = [];
+
+        for (let i = 0; i < itensValidos.length; i++) {
+            const item = itensValidos[i];
+            if (!item.nome || item.preco <= 0) continue;
+
+            const similares = await buscarProdutosSimilares(loja.id, item.nome);
+            const alteracao: AlteracaoPlanejada = {
+                nome: item.nome,
+                precoFoto: item.preco,
+                unidade: item.unidade,
+                acao: 'sem_alteracao',
+            };
+
+            if (similares.length > 0) {
+                const maisProximo = similares[0];
+                alteracao.produtoExistente = {
+                    id: maisProximo.id,
+                    produto_nome: maisProximo.produto_nome,
+                    preco: maisProximo.preco,
+                    unidade: maisProximo.unidade,
+                };
+
+                if (maisProximo.preco === item.preco) {
+                    alteracao.acao = 'sem_alteracao';
+                    linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ⏭️ Sem alteração`);
+                } else {
+                    alteracao.acao = 'preco_atualizado';
+                    linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → 🔄 Atualizar`);
+                }
+            } else {
+                alteracao.acao = 'novo_cadastro';
+                linhas.push(`${i + 1}. ${item.nome}\n   Estoque: (não existe) | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ✅ Novo`);
+            }
+
+            alteracoes.push(alteracao);
+        }
+
+        if (alteracoes.length === 0) {
+            await sendTextMessage(from, 'Nenhum produto válido encontrado.');
+            await limparContexto(from);
+            await enviarMenu(loja.nome, from);
+            return;
+        }
+
+        const linhasAgrupadas = linhas.slice(0, 30).join('\n');
+        const sufixo = linhas.length > 30 ? `\n\n...e mais ${linhas.length - 30} item(s).` : '';
+        const totalNovos = alteracoes.filter(a => a.acao === 'novo_cadastro').length;
+        const totalAtualizar = alteracoes.filter(a => a.acao === 'preco_atualizado').length;
+        const totalIgual = alteracoes.filter(a => a.acao === 'sem_alteracao').length;
+
+        let resumo = `📋 *Resumo das alterações:*\n\n`;
+        if (totalNovos > 0) resumo += `✅ Novo(s): ${totalNovos}\n`;
+        if (totalAtualizar > 0) resumo += `🔄 Atualizar: ${totalAtualizar}\n`;
+        if (totalIgual > 0) resumo += `⏭️ Sem alteração: ${totalIgual}\n`;
+        resumo += `\n${linhasAgrupadas}${sufixo}`;
+
+        await salvarContexto(from, {
+            ...contexto,
+            estado: EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES,
+            itensPendenteConfirmacao: itensValidos,
+            alteracoesPlanejadas: alteracoes,
+        });
+
+        await sendTextMessage(from, resumo);
+        await delay(300);
+        await sendInteractiveButtons(from, `⚡ Confirma as alterações acima?`, [
+            { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar' },
+            { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar' },
+        ]);
+
 
     } catch (err) {
         logger.error({ err, from }, '[Erro multimodal]');
@@ -962,21 +1245,38 @@ async function buscarProdutosSimilares(
 }
 
 
-/** Sprint 2 #9: INSERT com truncate de segurança */
-async function ingeriCatalogo(lojaId: string, produto: DadosProduto): Promise<void> {
+/** Sprint 2 #9: INSERT com truncate de segurança e deduplication (Sprint 15) */
+async function ingeriCatalogo(lojaId: string, produto: DadosProduto, fonte: string = 'manual'): Promise<{ inserido: boolean }> {
+    // Deduplication: ignora se já existe com o mesmo nome e preço nas últimas 24h
+    const { data: existente } = await supabase
+        .from('catalogo_historico')
+        .select('id')
+        .eq('loja_id', lojaId)
+        .ilike('produto_nome', produto.nome.substring(0, 250))
+        .eq('preco', produto.preco)
+        .eq('disponivel', true)
+        .gte('criado_em', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+        .limit(1);
+
+    if (existente && existente.length > 0) {
+        logger.info({ lojaId, nome: produto.nome, preco: produto.preco }, '[Ledger] Duplicata ignorada (mesmo preço nas últimas 24h)');
+        return { inserido: false };
+    }
+
     const payload = {
         loja_id:        lojaId,
         produto_nome:   produto.nome.substring(0, 250),
         preco:          produto.preco,
         unidade:        (produto.unidade || 'un').substring(0, 30),
         disponivel:     true,
-        fonte_ingestao: 'manual',
+        fonte_ingestao: fonte,
     };
     const { error } = await supabase.from('catalogo_historico').insert(payload);
     if (error) {
         logger.error({ error }, '[Ledger] Erro no INSERT de catálogo');
         throw new Error('Falha ao gravar produto no banco.');
     }
+    return { inserido: true };
 }
 
 /**
