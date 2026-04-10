@@ -613,7 +613,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     }
 
     // ══════════════════════════════════════════════════════════
-    // CONFIRMAÇÃO DE ALTERAÇÕES PLANEJADAS (com edição individual)
+// CONFIRMAÇÃO DE ALTERAÇÕES PLANEJADAS (com edição individual)
     // ════════════════════════════════════════════════════════════════
     if (contexto.estado === EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES) {
         const alteracoes = contexto.alteracoesPlanejadas ?? [];
@@ -623,6 +623,13 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         const editar   = isInteractive && buttonId === 'editar_item_lista';
         
         if (confirmou) {
+            // Validação: verificando se há itens ambíguos não resolvidos
+            const ambiguos = alteracoes.filter(a => a.acao === 'ambiguo');
+            if (ambiguos.length > 0) {
+                await sendTextMessage(from, `⚠️ Atenção! Você tem *${ambiguos.length}* produto(s) ambiguo(s) na lista. Use o botão *✏️ Editar um Item* para escolher qual produto do estoque corresponde à foto.`);
+                return;
+            }
+            
             if (alteracoes.length === 0) {
                 await sendTextMessage(from, 'Nada a alterar. Tente novamente.');
                 await limparContexto(from);
@@ -776,19 +783,39 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 acao: undefined,
             });
             
-            // Reconstruir resumo
+            // Reconstruir resumo com detalhes
             let novoResumo = `📋 *Resumo atualizado:*\n\n`;
             let novos = 0, atualizados = 0, iguais = 0, ambiguos = 0;
             lista.forEach((item: any, i: number) => {
                 const simbolo = item.acao === 'novo_cadastro' ? '✅' : item.acao === 'preco_atualizado' ? '🔄' : item.acao === 'ambiguo' ? '⚠️' : '⏭️';
-                novoResumo += `${i + 1}. ${item.nome} → R$ ${item.precoFoto.toFixed(2).replace('.', ',')} ${simbolo}\n`;
+                
+                let linha = `${i + 1}. ${item.nome} → R$ ${item.precoFoto.toFixed(2).replace('.', ',')} ${simbolo}`;
+                
+                if (item.acao === 'ambiguo' && item.similares) {
+                    linha += `\n   ⚠️ ${item.similares.length} opções no estoque`;
+                } else if (item.acao === 'preco_atualizado' && item.produtoExistente) {
+                    linha += `\n   Estoque: ${item.produtoExistente.produto_nome} (R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')})`;
+                } else if (item.acao === 'sem_alteracao' && item.produtoExistente) {
+                    linha += `\n   Estoque: ${item.produtoExistente.produto_nome} (R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')})`;
+                } else if (item.acao === 'novo_cadastro') {
+                    linha += `\n   Estoque: (não existe)`;
+                }
+                
+                novoResumo += linha + '\n';
                 if (item.acao === 'novo_cadastro') novos++;
                 else if (item.acao === 'preco_atualizado') atualizados++;
                 else if (item.acao === 'sem_alteracao') iguais++;
                 else ambiguos++;
             });
             
-            await sendTextMessage(from, `✅ Escolha registrada!\n\n${novoResumo}`);
+            // Contador
+            let contadores = '';
+            if (novos > 0) contadores += `✅ Novo(s): ${novos} `;
+            if (atualizados > 0) contadores += `🔄 Atualizar: ${atualizados} `;
+            if (iguais > 0) contadores += `⏭️ Iguais: ${iguais} `;
+            if (ambiguos > 0) contadores += `⚠️ Ambíguos: ${ambiguos}`;
+            
+            await sendTextMessage(from, `✅ Escolha registrada!\n\n${contadores}\n\n${novoResumo}`);
             await delay(300);
             await sendInteractiveButtons(from, `O que deseja fazer agora?`, [
                 { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar Todos' },
@@ -841,9 +868,22 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         });
         
         let novoResumo = `📋 *Resumo atualizado:*\n\n`;
-        lista.forEach((item, i) => {
-            const simbolo = item.acao === 'novo_cadastro' ? '✅' : item.acao === 'preco_atualizado' ? '🔄' : '⏭️';
-            novoResumo += `${i + 1}. ${item.nome} → R$ ${item.precoFoto.toFixed(2).replace('.', ',')} ${simbolo}\n`;
+        lista.forEach((item: any, i: number) => {
+            const simbolo = item.acao === 'novo_cadastro' ? '✅' : item.acao === 'preco_atualizado' ? '🔄' : item.acao === 'ambiguo' ? '⚠️' : '⏭️';
+            
+            let linha = `${i + 1}. ${item.nome} → R$ ${item.precoFoto.toFixed(2).replace('.', ',')} ${simbolo}`;
+            
+            if (item.acao === 'ambiguo' && item.similares) {
+                linha += `\n   ⚠️ ${item.similares.length} opções no estoque`;
+            } else if (item.acao === 'preco_atualizado' && item.produtoExistente) {
+                linha += `\n   Estoque: ${item.produtoExistente.produto_nome} (R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')})`;
+            } else if (item.acao === 'sem_alteracao' && item.produtoExistente) {
+                linha += `\n   Estoque: ${item.produtoExistente.produto_nome} (R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')})`;
+            } else if (item.acao === 'novo_cadastro') {
+                linha += `\n   Estoque: (não existe)`;
+            }
+            
+            novoResumo += linha + '\n';
         });
         
         await sendTextMessage(from, `${mensagemFeedback}\n\n${novoResumo}`);
