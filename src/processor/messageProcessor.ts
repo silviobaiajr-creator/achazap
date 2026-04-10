@@ -1,41 +1,23 @@
-import { Worker, Job } from 'bullmq';
-import { createClient } from '../queue/redisClient.js';
 import { processMessage } from '../ai/orchestrator.js';
 import type { WhatsAppMessage } from '../lib/whatsapp.js';
 import { logger } from '../lib/logger.js';
-
-const connection = createClient();
+import { boss } from '../queue/pgBossClient.js';
 
 /**
- * Worker responsável por processar as mensagens da fila "messages".
- * Chama o orquestrador de IA (Gemini) para cada nova mensagem.
- * concurrency: 5 → até 5 conversas simultâneas
- * limiter: 10/s → respeita rate limit da API Gemini
+ * Inicializador da rotina que desempilha mensagens do banco.
+ * O pg-boss cuida do limite de concorrência e das re-tentativas baseadas no timeout.
  */
-export const messageWorker = new Worker<WhatsAppMessage>(
-    'messages',
-    async (job: Job<WhatsAppMessage>) => {
-        logger.info({ jobId: job.id, from: job.data.from, type: job.data.type }, '[Processor] Iniciando job');
-        await processMessage(job.data);
-    },
-    {
-        connection,
-        concurrency: 5,
-        limiter: {
-            max: 10,
-            duration: 1000,
-        },
-    }
-);
-
-messageWorker.on('failed', (job, err) => {
-    logger.error({ jobId: job?.id, from: job?.data?.from, err: err.message }, '[Processor] Job falhou');
-});
-
-messageWorker.on('completed', (job) => {
-    logger.info({ jobId: job.id, from: job.data.from }, '[Processor] Job concluído');
-});
-
-messageWorker.on('active', (job) => {
-    logger.debug({ jobId: job.id, from: job.data.from }, '[Processor] Job ativo');
-});
+export async function startMessageWorker() {
+    await boss.work('messages', {
+        teamSize: 5,        // Equivalente ao concurrency: 5
+        teamConcurrency: 5,
+    } as any, async (jobs: any) => { // boss.work em lote ou unico
+        const job = Array.isArray(jobs) ? jobs[0] : (jobs as any);
+        const message = job.data;
+        const msgId = job.id;
+        
+        logger.info({ jobId: msgId, from: message.from, type: message.type }, '[Processor] Iniciando job (pg-boss)');
+        await processMessage(message);
+    });
+    logger.info('[Processor] Worker ativo com pg-boss');
+}

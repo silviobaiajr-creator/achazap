@@ -24,8 +24,8 @@ const EnvSchema = z.object({
     SUPABASE_URL: z.string().url('SUPABASE_URL deve ser uma URL válida'),
     SUPABASE_SECRET_KEY: z.string().min(10, 'SUPABASE_SECRET_KEY inválida ou ausente'),
 
-    // Redis (único — estado + BullMQ)
-    REDIS_URL: z.string().min(10, 'REDIS_URL inválida ou ausente'),
+    // PostgreSQL Direto (PgBoss e Batch)
+    DATABASE_URL: z.string().startsWith('postgres', 'DATABASE_URL inválida ou ausente'),
 });
 
 function validarEnv() {

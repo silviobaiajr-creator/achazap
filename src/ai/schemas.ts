@@ -38,29 +38,41 @@ export const FugaNLPSchema = z.object({
     intencao_fuga: z.boolean(),
 });
 
-// ─── Multimodal (OCR de imagem / transcrição de áudio) ───────────────────────
+// ─── Multimodal (OCR de imagem / transcrição de áudio em lote) ───────────────────────
+
+export const ItemSchema = z.object({
+    nome:    z.string().max(250),
+    preco:   z.number(),
+    unidade: z.string().max(30).default('un'),
+});
 
 export const MultimodalExtraidoSchema = z.union([
     z.object({
         legibilidade_baixa: z.literal(true),
     }),
     z.object({
-        multiplos_produtos: z.literal(true),
-    }),
-    z.object({
         ruido_detectado: z.literal(true),
     }),
     z.object({
         legibilidade_baixa: z.boolean().default(false),
-        multiplos_produtos:  z.boolean().default(false),
-        ruido_detectado:     z.boolean().default(false),
-        nome:    z.string().max(250).nullable(),
-        preco:   z.number().nullable(),
-        unidade: z.string().max(30).nullable(),
+        ruido_detectado:    z.boolean().default(false),
+        itens: z.array(ItemSchema)
     }),
 ]);
 
+export type MultimodalItem = z.infer<typeof ItemSchema>;
 export type MultimodalExtraido = z.infer<typeof MultimodalExtraidoSchema>;
+
+// ─── Mapeamento de CSV (Supermercados) ───────────────────────────────────────
+
+export const CSVMapeamentoSchema = z.object({
+    coluna_nome:    z.string(),
+    coluna_preco:   z.string(),
+    coluna_unidade: z.string().nullable().optional(),
+    coluna_sku:     z.string().nullable().optional(),
+});
+
+export type CSVMapeamento = z.infer<typeof CSVMapeamentoSchema>;
 
 // ─── Oferta de Desconto ──────────────────────────────────────────────────────
 

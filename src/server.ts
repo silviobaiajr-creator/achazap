@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { extractMessage } from './lib/whatsapp.js';
 import { supabase } from './lib/supabase.js';
-import { getRedisCloudClient, verificarConexao, marcarWamidProcessado } from './lib/redis-cloud.js';
+import { verificarConexao, marcarWamidProcessado } from './lib/redis-cloud.js';
 import { messageQueue } from './queue/messageQueue.js';
 import { logger } from './lib/logger.js';
 

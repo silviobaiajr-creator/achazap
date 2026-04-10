@@ -1,13 +1,13 @@
-import { Queue } from 'bullmq';
-import { createClient } from './redisClient.js';
 import type { WhatsAppMessage } from '../lib/whatsapp.js';
+import { boss } from './pgBossClient.js';
 
-const connection = createClient();
-
-
-/**
- * Fila principal onde o Webhook deposita as mensagens do WhatsApp.
- * BullMQ garante que nenhuma mensagem seja perdida em caso de reinicialização do servidor.
- */
-export const messageQueue = new Queue<WhatsAppMessage>('messages', { connection });
-
+export const messageQueue = {
+    add: async (name: string, data: WhatsAppMessage, opts?: any) => {
+        // Envia para o pg-boss mantendo compatibilidade com a chamada antiga
+        await boss.send('messages', data as any, { 
+            singletonKey: opts?.jobId,
+            retryLimit: opts?.attempts,
+            retryDelay: 2
+        });
+    }
+};

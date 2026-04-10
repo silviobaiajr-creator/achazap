@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import './config.js';
 import { buildServer } from './server.js';
-import { messageWorker } from './processor/messageProcessor.js'; // inicia o Worker BullMQ
+import { startMessageWorker } from './processor/messageProcessor.js';
+import { startQueue, boss } from './queue/pgBossClient.js';
 
 const PORT = Number(process.env.PORT ?? 3000);
 
@@ -9,6 +10,9 @@ async function main() {
     const app = buildServer();
 
     try {
+        await startQueue();
+        await startMessageWorker();
+        
         await app.listen({ port: PORT, host: '0.0.0.0' });
         const publicUrl = process.env.BASE_URL ?? `http://localhost:${PORT}`;
         console.log(`✅ AchaZap rodando na porta ${PORT}`);
@@ -19,19 +23,14 @@ async function main() {
         process.exit(1);
     }
 
-    // Graceful Shutdown completo: fecha Fastify, Worker BullMQ e Redis
+    // Graceful Shutdown completo: fecha Fastify e pg-boss
     const shutdown = async () => {
         console.log('\n⚠️  Encerrando servidor graciosamente...');
         try {
-            await messageWorker.close();          // para de aceitar novos jobs
-            console.log('   ✅ BullMQ Worker encerrado');
-
+            await boss.stop();
+            console.log('   ✅ Pg-boss Worker encerrado');
             await app.close();
             console.log('   ✅ Fastify encerrado');
-
-            const { getRedisCloudClient } = await import('./lib/redis-cloud.js');
-            getRedisCloudClient().disconnect();
-            console.log('   ✅ Redis desconectado');
         } catch (err) {
             console.error('   ⚠️ Erro no shutdown:', err);
         }
