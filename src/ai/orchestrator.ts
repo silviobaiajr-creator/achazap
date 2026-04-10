@@ -62,7 +62,7 @@ interface ContextoSessao {
     alteracoesPlanejadas?: Array<AlteracaoPlanejada>; // resumo comparativo antes de confirmar
 }
 
-type TipoAlteracao = 'novo_cadastro' | 'preco_atualizado' | 'sem_alteracao';
+type TipoAlteracao = 'novo_cadastro' | 'preco_atualizado' | 'sem_alteracao' | 'ambiguo';
 
 interface AlteracaoPlanejada {
     nome: string;
@@ -70,6 +70,7 @@ interface AlteracaoPlanejada {
     unidade: string;
     acao: TipoAlteracao;
     produtoExistente?: { id: string; produto_nome: string; preco: number; unidade: string };
+    similares?: Array<{ id: string; produto_nome: string; preco: number; unidade: string }>;
 }
 
 // ============================================================
@@ -696,6 +697,25 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         const indiceReal = numeroDigitado - 1;
         const itemEscolhido = lista[indiceReal];
         
+        // Se o item tem múltiplas opções (ambíguo), mostra a lista para desempate
+        if (itemEscolhido.acao === 'ambiguo' && itemEscolhido.similares && itemEscolhido.similares.length > 1) {
+            let msgOpcoes = `⚠️ Encontrei ${itemEscolhido.similares.length} opções no seu estoque. Qual é o da foto?\n\n`;
+            itemEscolhido.similares.forEach((s: any, idx: number) => {
+                msgOpcoes += `${idx + 1} - ${s.produto_nome} (R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade})\n`;
+            });
+            msgOpcoes += `\n0 - Nenhum (cadastrar como novo)`;
+            
+            await salvarContexto(from, {
+                ...contexto,
+                estado: EstadosFluxo.AGUARDANDO_NOVO_PRECO_EDICAO,
+                acao: indiceReal.toString() + '_desempate',
+                perguntaPendente: msgOpcoes,
+            });
+            
+            await sendTextMessage(from, msgOpcoes);
+            return;
+        }
+        
         await salvarContexto(from, {
             ...contexto,
             estado: EstadosFluxo.AGUARDANDO_NOVO_PRECO_EDICAO,
@@ -708,11 +728,77 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         return;
     }
     
-    // ═��══════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════
     // FLUXO: Lojista digita novo preço ou 0 para excluir
     // ════════════════════════════════════════════════════════════════
     if (contexto.estado === EstadosFluxo.AGUARDANDO_NOVO_PRECO_EDICAO) {
         const lista = contexto.alteracoesPlanejadas ?? [];
+        
+        // Verifica se está em modo de desempate (escolher qual similar usar)
+        if (contexto.acao?.includes('_desempate')) {
+            const [indiceStr] = contexto.acao.split('_');
+            const indiceReal = parseInt(indiceStr, 10);
+            const item = lista[indiceReal];
+            const opcaoNum = parseInt(userMessageText.trim(), 10);
+            
+            if (isNaN(opcaoNum) || opcaoNum < 0 || opcaoNum > (item.similares?.length ?? 0)) {
+                await sendTextMessage(from, `⚠️ Número inválido. Digite entre *0* e *${item.similares?.length}*.`);
+                return;
+            }
+            
+            if (opcaoNum === 0) {
+                // Usuário escolheu "Nenhum" - cadastrar como novo
+                item.acao = 'novo_cadastro';
+                item.produtoExistente = undefined;
+                item.similares = undefined;
+            } else {
+                // Usuário escolheu um dos similares
+                const similarEscolhido = item.similares![opcaoNum - 1];
+                item.produtoExistente = {
+                    id: similarEscolhido.id,
+                    produto_nome: similarEscolhido.produto_nome,
+                    preco: similarEscolhido.preco,
+                    unidade: similarEscolhido.unidade,
+                };
+                item.similares = undefined; // limpa a lista
+                
+                if (similarEscolhido.preco === item.precoFoto) {
+                    item.acao = 'sem_alteracao';
+                } else {
+                    item.acao = 'preco_atualizado';
+                }
+            }
+            
+            await salvarContexto(from, {
+                ...contexto,
+                estado: EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES,
+                alteracoesPlanejadas: lista,
+                acao: undefined,
+            });
+            
+            // Reconstruir resumo
+            let novoResumo = `📋 *Resumo atualizado:*\n\n`;
+            let novos = 0, atualizados = 0, iguais = 0, ambiguos = 0;
+            lista.forEach((item: any, i: number) => {
+                const simbolo = item.acao === 'novo_cadastro' ? '✅' : item.acao === 'preco_atualizado' ? '🔄' : item.acao === 'ambiguo' ? '⚠️' : '⏭️';
+                novoResumo += `${i + 1}. ${item.nome} → R$ ${item.precoFoto.toFixed(2).replace('.', ',')} ${simbolo}\n`;
+                if (item.acao === 'novo_cadastro') novos++;
+                else if (item.acao === 'preco_atualizado') atualizados++;
+                else if (item.acao === 'sem_alteracao') iguais++;
+                else ambiguos++;
+            });
+            
+            await sendTextMessage(from, `✅ Escolha registrada!\n\n${novoResumo}`);
+            await delay(300);
+            await sendInteractiveButtons(from, `O que deseja fazer agora?`, [
+                { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar Todos' },
+                { id: 'editar_item_lista', title: '✏️ Editar outro' },
+                { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar Tudo' },
+            ]);
+            return;
+        }
+        
+        // Modo normal: editar preço ou excluir
         const indiceReal = parseInt(contexto.acao ?? '0', 10);
         
         const precoLimpo = userMessageText.replace(',', '.').replace(/[^\d.]/g, '');
@@ -804,20 +890,27 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 };
                 
                 if (similares.length > 0) {
-                    const maisProximo = similares[0];
-                    alteracao.produtoExistente = {
-                        id: maisProximo.id,
-                        produto_nome: maisProximo.produto_nome,
-                        preco: maisProximo.preco,
-                        unidade: maisProximo.unidade,
-                    };
-                    
-                    if (maisProximo.preco === item.preco) {
-                        alteracao.acao = 'sem_alteracao';
-                        linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ⏭️ Sem alteração`);
+                    // Verifica se há ambiguidade (múltiplos resultados)
+                    if (similares.length > 1) {
+                        alteracao.similares = similares;
+                        alteracao.acao = 'ambiguo';
+                        linhas.push(`${i + 1}. ${item.nome}\n   ⚠️ ${similares.length} opções no estoque (Foto: R$ ${item.preco.toFixed(2).replace('.', ',')}) → ⚠️ Ambíguo`);
                     } else {
-                        alteracao.acao = 'preco_atualizado';
-                        linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → 🔄 Atualizar`);
+                        const maisProximo = similares[0];
+                        alteracao.produtoExistente = {
+                            id: maisProximo.id,
+                            produto_nome: maisProximo.produto_nome,
+                            preco: maisProximo.preco,
+                            unidade: maisProximo.unidade,
+                        };
+                        
+                        if (maisProximo.preco === item.preco) {
+                            alteracao.acao = 'sem_alteracao';
+                            linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ⏭️ Sem alteração`);
+                        } else {
+                            alteracao.acao = 'preco_atualizado';
+                            linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → 🔄 Atualizar`);
+                        }
                     }
                 } else {
                     alteracao.acao = 'novo_cadastro';
@@ -839,11 +932,13 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             const totalNovos = alteracoes.filter(a => a.acao === 'novo_cadastro').length;
             const totalAtualizar = alteracoes.filter(a => a.acao === 'preco_atualizado').length;
             const totalIgual = alteracoes.filter(a => a.acao === 'sem_alteracao').length;
+            const totalAmbiguo = alteracoes.filter(a => a.acao === 'ambiguo').length;
             
             let resumo = `📋 *Resumo das alterações:*\n\n`;
             if (totalNovos > 0) resumo += `✅ Novo(s): ${totalNovos}\n`;
             if (totalAtualizar > 0) resumo += `🔄 Atualizar: ${totalAtualizar}\n`;
             if (totalIgual > 0) resumo += `⏭️ Sem alteração: ${totalIgual}\n`;
+            if (totalAmbiguo > 0) resumo += `⚠️ Ambíguo(s): ${totalAmbiguo}\n`;
             resumo += `\n${linhasAgrupadas}${sufixo}`;
             
             await salvarContexto(from, {
@@ -1205,20 +1300,27 @@ JSON:`;
             };
 
             if (similares.length > 0) {
-                const maisProximo = similares[0];
-                alteracao.produtoExistente = {
-                    id: maisProximo.id,
-                    produto_nome: maisProximo.produto_nome,
-                    preco: maisProximo.preco,
-                    unidade: maisProximo.unidade,
-                };
-
-                if (maisProximo.preco === item.preco) {
-                    alteracao.acao = 'sem_alteracao';
-                    linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ⏭️ Sem alteração`);
+                // Verifica se há ambiguidade (múltiplos resultados)
+                if (similares.length > 1) {
+                    alteracao.similares = similares;
+                    alteracao.acao = 'ambiguo';
+                    linhas.push(`${i + 1}. ${item.nome}\n   ⚠️ ${similares.length} opções no estoque (Foto: R$ ${item.preco.toFixed(2).replace('.', ',')}) → ⚠️ Ambíguo`);
                 } else {
-                    alteracao.acao = 'preco_atualizado';
-                    linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → 🔄 Atualizar`);
+                    const maisProximo = similares[0];
+                    alteracao.produtoExistente = {
+                        id: maisProximo.id,
+                        produto_nome: maisProximo.produto_nome,
+                        preco: maisProximo.preco,
+                        unidade: maisProximo.unidade,
+                    };
+
+                    if (maisProximo.preco === item.preco) {
+                        alteracao.acao = 'sem_alteracao';
+                        linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ⏭️ Sem alteração`);
+                    } else {
+                        alteracao.acao = 'preco_atualizado';
+                        linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → 🔄 Atualizar`);
+                    }
                 }
             } else {
                 alteracao.acao = 'novo_cadastro';
@@ -1240,11 +1342,13 @@ JSON:`;
         const totalNovos = alteracoes.filter(a => a.acao === 'novo_cadastro').length;
         const totalAtualizar = alteracoes.filter(a => a.acao === 'preco_atualizado').length;
         const totalIgual = alteracoes.filter(a => a.acao === 'sem_alteracao').length;
+        const totalAmbiguo = alteracoes.filter(a => a.acao === 'ambiguo').length;
 
         let resumo = `📋 *Resumo das alterações:*\n\n`;
         if (totalNovos > 0) resumo += `✅ Novo(s): ${totalNovos}\n`;
         if (totalAtualizar > 0) resumo += `🔄 Atualizar: ${totalAtualizar}\n`;
         if (totalIgual > 0) resumo += `⏭️ Sem alteração: ${totalIgual}\n`;
+        if (totalAmbiguo > 0) resumo += `⚠️ Ambíguo(s): ${totalAmbiguo}\n`;
         resumo += `\n${linhasAgrupadas}${sufixo}`;
 
         await salvarContexto(from, {
