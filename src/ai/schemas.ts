@@ -19,6 +19,24 @@ export const ProdutoExtraidoSchema = z.object({
 
 export type ProdutoExtraido = z.infer<typeof ProdutoExtraidoSchema>;
 
+// ─── Extração de Múltiplos Produtos por Texto ─────────────────────────────
+
+export const ProdutoItemSchema = z.object({
+    nome: z.string().max(250),
+    preco: z.number(),
+    unidade: z.string().max(30).default('un'),
+});
+
+export const MultiProdutosTextoSchema = z.union([
+    z.object({ ruido_detectado: z.literal(true) }),
+    z.object({
+        ruido_detectado: z.boolean().default(false),
+        itens: z.array(ProdutoItemSchema)
+    }),
+]);
+
+export type MultiProdutosTexto = z.infer<typeof MultiProdutosTextoSchema>;
+
 // ─── Busca de Similares via Gemini (buscarProdutosSimilares) ─────────────────
 
 export const IndicesSimilaresSchema = z.array(z.number().int().positive());

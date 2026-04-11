@@ -26,6 +26,7 @@ import {
     FugaNLPSchema,
     MultimodalExtraidoSchema,
     OfertaExtraidaSchema,
+    MultiProdutosTextoSchema,
     parseSafe,
 } from './schemas.js';
 
@@ -227,46 +228,51 @@ async function processarDadosProduto(from: string, loja: any, userMessageText: s
         // await redis.call('sendReaction', from, '🔍').catch(() => {});  // best-effort
     } catch { /* ignora se API não suportar */ }
 
-    const prompt = `Você é um extrator estrito de dados de produtos de estoque. NUNCA responda perguntas gerais. NUNCA dê conselhos. Sua única função é extrair Nome, Preço e Unidade de mensagens de lojistas.
+    const promptMulti = `Você é um extrator de produtos de estoque. Analise a mensagem e extraia TODOS os produtos encontrados.
 
-${dadosExistentes?.nome ? `DADOS JÁ COLETADOS: nome="${dadosExistentes.nome}"` : ''}
-${dadosExistentes?.preco !== undefined && dadosExistentes?.preco !== null ? `DADOS JÁ COLETADOS: preco=${dadosExistentes.preco}` : ''}
-${dadosExistentes?.unidade ? `DADOS JÁ COLETADOS: unidade="${dadosExistentes.unidade}"` : ''}
+Regras:
+1. Extraia TODOS os produtos da mensagem (ex: "Coca 5,00, guaraná 4,50, pão 3,00" = 3 produtos)
+2. Preços com vírgula → converter para ponto
+3. Nome em Title Case, Unidade máx 30 chars (padrão "un")
+4. Se a mensagem contém APENAS um produto, continue funcionando como antes
 
-TAREFA: Extraia nome, preco e unidade da mensagem.
+Retorne formato:
+- Se múltiplos: {"ruido_detectado": false, "itens": [{"nome": "Coca Cola", "preco": 5.00, "unidade": "un"}, {outro}]}
+- Se ruído: {"ruido_detectado": true}
+- Se apenas um (compatibilidade): {"ruido_detectado": false, "nome": "...", "preco": ..., "unidade": "..."}
 
-Regras de extração:
-1. Se o usuário enviou APENAS um número (ex: "6", "25", "18.50"), isso é o PREÇO. Use o nome já coletado.
-2. Preços com vírgula (8,50) → converter para ponto (8.50)
-3. Nome deve ser normalizado com Title Case (ex: "feijão" → "Feijão")
-4. Unidade padrão se não informada: "un"
-5. Truncar nome em 250 chars e unidade em 30 chars
-6. No varejo, nomes atípicos existem ("Bom Ar", "Veja"). Considere o contexto comercial.
-7. Se a palavra do nome for fora do contexto usual (ex: "Aros", "Pneu"), mas parecer ser um erro de digitação para algo comum (ex: "Arroz"), NÃO corrija o nome silenciosamente se for uma palavra que existe. Retorne "precisa_confirmacao": true e sugira o nome corrigido em "sugestao".
-
-Regras de ruído:
-- Se a mensagem for PURAMENTE conversacional ("vai chover?", "obrigado", "tudo bem"), retorne: {"ruido_detectado": true, "nome": null, "preco": null, "unidade": null, "incompleto": false}
-- Se a mensagem contiver dados de outro produto (usuário mudou de ideia), ignore o rascunho e crie JSON novo.
-
-Formatos de resposta:
-- Completo: {"incompleto": false, "ruido_detectado": false, "nome": "Feijão Preto", "preco": 18.00, "unidade": "kg"}
-- Falta preço: {"incompleto": true, "ruido_detectado": false, "falta": "preco", "nome": "Feijão Preto", "preco": null, "unidade": "kg"}
-- Ruído: {"incompleto": false, "ruido_detectado": true, "nome": null, "preco": null, "unidade": null}
-
-Mensagem do usuário: "${userMessageText}"
+Mensagem: "${userMessageText}"
 
 JSON:`;
 
     try {
         const result = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: prompt,
+            contents: promptMulti,
             config: { responseMimeType: 'application/json' },
         });
 
         const rawText = result.text || '{}';
         logTokens('extrair_produto', from, loja?.id ?? 'unknown', result.usageMetadata);
         logger.debug({ from, rawText }, '[Gemini] extração produto');
+
+        // Tenta extrair múltiplos produtos primeiro
+        const dadosMulti = parseSafe(MultiProdutosTextoSchema, rawText, {
+            ruido_detectado: false,
+            itens: []
+        });
+
+        // Se detectou múltiplos produtos, entra no fluxo de lote
+        if (!dadosMulti.ruido_detectado && dadosMulti.itens && dadosMulti.itens.length > 1) {
+            logger.info({ from, count: dadosMulti.itens.length }, '[processarDadosProduto] Múltiplos produtos detectados');
+            const itensFormatados = dadosMulti.itens.map((i: any) => ({
+                nome: i.nome,
+                preco: i.preco,
+                unidade: i.unidade || 'un'
+            }));
+            await processarLoteProdutos(from, loja, itensFormatados, contexto);
+            return;
+        }
 
         const dados = parseSafe(ProdutoExtraidoSchema, rawText, {
             incompleto: false,
@@ -371,13 +377,117 @@ JSON:`;
 }
 
 // ============================================================
-// HELPER: merge null-safe (Sprint 10 #3)
-// Novo valor só substitui o antigo se não for null/undefined
-// ============================================================
-function nullSafe<T>(novoValor: T | null | undefined, valorAntigo: T | null | undefined): T | null {
-    if (novoValor !== null && novoValor !== undefined) return novoValor;
-    return valorAntigo ?? null;
-}
+    // HELPER: merge null-safe (Sprint 10 #3)
+    // Novo valor só substitui o antigo se não for null/undefined
+    // ============================================================
+    function nullSafe<T>(novoValor: T | null | undefined, valorAntigo: T | null | undefined): T | null {
+        if (novoValor !== null && novoValor !== undefined) return novoValor;
+        return valorAntigo ?? null;
+    }
+
+    // ============================================================
+    // PROCESSAMENTO EM LOTE (Texto ou Foto com múltiplos produtos)
+    // ============================================================
+    async function processarLoteProdutos(
+        from: string,
+        loja: any,
+        itensRaw: Array<{nome: string; preco: number; unidade: string}>,
+        contexto: ContextoSessao
+    ): Promise<void> {
+        const itensValidos: DadosProduto[] = itensRaw
+            .filter((i: any) => i.nome && i.preco > 0)
+            .map((i: any) => ({
+                nome: String(i.nome).substring(0, 250),
+                preco: i.preco as number,
+                unidade: String(i.unidade || 'un').substring(0, 30),
+            }));
+
+        if (itensValidos.length === 0) {
+            await sendTextMessage(from, 'Nenhum produto válido encontrado.');
+            return;
+        }
+
+        await sendTextMessage(from, `⏳ Verificando *${itensValidos.length}* produto(s) no estoque...`);
+
+        const alteracoes: AlteracaoPlanejada[] = [];
+        const linhas: string[] = [];
+
+        for (let i = 0; i < itensValidos.length; i++) {
+            const item = itensValidos[i];
+            if (!item.nome || item.preco <= 0) continue;
+
+            const similares = await buscarProdutosSimilares(loja.id, item.nome);
+            const alteracao: AlteracaoPlanejada = {
+                nome: item.nome,
+                precoFoto: item.preco,
+                unidade: item.unidade,
+                acao: 'sem_alteracao',
+            };
+
+            if (similares.length > 0) {
+                if (similares.length > 1) {
+                    alteracao.similares = similares;
+                    alteracao.acao = 'ambiguo';
+                    linhas.push(`${i + 1}. ${item.nome}\n   ⚠️ ${similares.length} opções no estoque (Foto: R$ ${item.preco.toFixed(2).replace('.', ',')}) → ⚠️ Ambíguo`);
+                } else {
+                    const maisProximo = similares[0];
+                    alteracao.produtoExistente = {
+                        id: maisProximo.id,
+                        produto_nome: maisProximo.produto_nome,
+                        preco: maisProximo.preco,
+                        unidade: maisProximo.unidade,
+                    };
+
+                    if (maisProximo.preco === item.preco) {
+                        alteracao.acao = 'sem_alteracao';
+                        linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ⏭️ Sem alteração`);
+                    } else {
+                        alteracao.acao = 'preco_atualizado';
+                        linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → 🔄 Atualizar`);
+                    }
+                }
+            } else {
+                alteracao.acao = 'novo_cadastro';
+                linhas.push(`${i + 1}. ${item.nome}\n   Estoque: (não existe) | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ✅ Novo`);
+            }
+
+            alteracoes.push(alteracao);
+        }
+
+        if (alteracoes.length === 0) {
+            await sendTextMessage(from, 'Nenhum produto válido encontrado.');
+            return;
+        }
+
+        const linhasAgrupadas = linhas.slice(0, 30).join('\n');
+        const sufixo = linhas.length > 30 ? `\n\n...e mais ${linhas.length - 30} item(s).` : '';
+        const totalNovos = alteracoes.filter(a => a.acao === 'novo_cadastro').length;
+        const totalAtualizar = alteracoes.filter(a => a.acao === 'preco_atualizado').length;
+        const totalIgual = alteracoes.filter(a => a.acao === 'sem_alteracao').length;
+        const totalAmbiguo = alteracoes.filter(a => a.acao === 'ambiguo').length;
+
+        let resumo = `📋 *Resumo das alterações:*\n\n`;
+        if (totalNovos > 0) resumo += `✅ Novo(s): ${totalNovos}\n`;
+        if (totalAtualizar > 0) resumo += `🔄 Atualizar: ${totalAtualizar}\n`;
+        if (totalIgual > 0) resumo += `⏭️ Sem alteração: ${totalIgual}\n`;
+        if (totalAmbiguo > 0) resumo += `⚠️ Ambíguo(s): ${totalAmbiguo}\n`;
+        resumo += `\n${linhasAgrupadas}${sufixo}`;
+
+        await salvarContexto(from, {
+            ...contexto,
+            estado: EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES,
+            itensPendenteConfirmacao: itensValidos,
+            alteracoesPlanejadas: alteracoes,
+        });
+
+        await sendTextMessage(from, resumo);
+        await delay(300);
+        await sendInteractiveButtons(from, `⚡ Confirma as alterações acima?`, [
+            { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar Todos' },
+            { id: 'editar_item_lista', title: '✏️ Editar um Item' },
+            { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar Tudo' },
+        ]);
+    }
 
 // ============================================================
 // HELPER: Continuação do fluxo (nova inserção ou busca peneira)
