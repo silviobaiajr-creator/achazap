@@ -228,18 +228,25 @@ async function processarDadosProduto(from: string, loja: any, userMessageText: s
         // await redis.call('sendReaction', from, '🔍').catch(() => {});  // best-effort
     } catch { /* ignora se API não suportar */ }
 
+    const avisoContexto = contexto.perguntaPendente 
+        ? `Atenção: o usuário está respondendo à pergunta "${contexto.perguntaPendente}". Ele pode ter digitado APENAS o preço (ex: "5.00"), APENAS a unidade, ou o nome. Extraia o dado e NÃO marque como ruído!` 
+        : '';
+
     const promptMulti = `Você é um extrator de produtos de estoque. Analise a mensagem e extraia TODOS os produtos encontrados.
 
 Regras:
-1. Extraia TODOS os produtos da mensagem (ex: "Coca 5,00, guaraná 4,50, pão 3,00" = 3 produtos)
+1. Extraia TODOS os produtos da mensagem (ex: "Coca 5,00, guaraná 4,50" = 2 produtos)
 2. Preços com vírgula → converter para ponto
 3. Nome em Title Case, Unidade máx 30 chars (padrão "un")
-4. Se a mensagem contém APENAS um produto, continue funcionando como antes
+4. Se a mensagem contém APENAS o nome de 1 produto sem preço (ex: "Leite"), NÃO marque ruído. Retorne como incompleto=true e falta="preco".
+5. Se for ruído real ou conversa fiada, marque ruido_detectado=true.
+${avisoContexto}
 
 Retorne formato:
 - Se múltiplos: {"ruido_detectado": false, "itens": [{"nome": "Coca Cola", "preco": 5.00, "unidade": "un"}, {outro}]}
 - Se ruído: {"ruido_detectado": true}
-- Se apenas um (compatibilidade): {"ruido_detectado": false, "nome": "...", "preco": ..., "unidade": "..."}
+- Se apenas um incompleto: {"ruido_detectado": false, "incompleto": true, "falta": "preco", "nome": "..."}
+- Se apenas um ok: {"ruido_detectado": false, "nome": "...", "preco": ..., "unidade": "..."}
 
 Mensagem: "${userMessageText}"
 
@@ -318,6 +325,16 @@ JSON:`;
             return;
         }
 
+        const mergedNome = nullSafe(dados.nome, dadosExistentes?.nome);
+        const mergedPreco = nullSafe(dados.preco, dadosExistentes?.preco);
+
+        // Força "incompleto" se faltar nome ou preço nas mesclas (fallback caso o Gemini não faça)
+        if (!mergedNome || !mergedPreco || mergedPreco <= 0) {
+            dados.incompleto = true;
+            if (!mergedPreco || mergedPreco <= 0) dados.falta = 'preco';
+            else if (!mergedNome) dados.falta = 'nome';
+        }
+
         // Sprint 10: dados incompletos → guardar rascunho
         if (dados.incompleto === true) {
             const novoRetries = retries + 1;
@@ -343,8 +360,8 @@ JSON:`;
 
             // Sprint 10 #3: merge null-safe — novo dado só substitui se não for null/undefined
             const novosDados: Partial<DadosProduto> = {
-                nome:    nullSafe(dados.nome,    dadosExistentes?.nome)    ?? undefined,
-                preco:   nullSafe(dados.preco,   dadosExistentes?.preco)   ?? undefined,
+                nome:    mergedNome ?? undefined,
+                preco:   mergedPreco ?? undefined,
                 unidade: nullSafe(dados.unidade, dadosExistentes?.unidade) ?? undefined,
             };
 
@@ -360,8 +377,8 @@ JSON:`;
 
         // Sprint 10 #3: merge null-safe dos dados completos
         const produto: DadosProduto = {
-            nome:    (nullSafe(dados.nome,    dadosExistentes?.nome)    ?? '').substring(0, 250),
-            preco:   nullSafe(dados.preco,    dadosExistentes?.preco)   ?? 0,
+            nome:    (mergedNome ?? '').substring(0, 250),
+            preco:   mergedPreco ?? 0,
             unidade: (nullSafe(dados.unidade, dadosExistentes?.unidade) ?? 'un').substring(0, 30),
         };
 
@@ -383,6 +400,54 @@ JSON:`;
     function nullSafe<T>(novoValor: T | null | undefined, valorAntigo: T | null | undefined): T | null {
         if (novoValor !== null && novoValor !== undefined) return novoValor;
         return valorAntigo ?? null;
+    }
+
+    // ============================================================
+    // HELPER VISUAL: formata card de produto para resumo de lote
+    // ============================================================
+    function formatarCartaoProduto(item: AlteracaoPlanejada, indice: number, fonte: 'texto' | 'foto' | 'audio' = 'texto'): string {
+        const SEP = '───────────────';
+        const num = `${indice + 1}.`;
+        const precoFoto = `R$ ${item.precoFoto.toFixed(2).replace('.', ',')} / ${item.unidade}`;
+        const rotuloFonte = fonte === 'foto' ? 'Foto' : fonte === 'audio' ? 'Áudio' : 'Digitado';
+
+        // Nome a exibir: para produtos já resolvidos (preco_atualizado/sem_alteracao)
+        // usamos o nome oficial do estoque; para os demais o nome enviado
+        const nomeExibido = (item.acao === 'preco_atualizado' || item.acao === 'sem_alteracao') && item.produtoExistente
+            ? item.produtoExistente.produto_nome
+            : item.nome;
+
+        let card = `${SEP}\n`;
+
+        if (item.acao === 'novo_cadastro') {
+            card += `✅ ${num} *${item.nome}*\n`;
+            card += `💰 Preço: *${precoFoto}*\n`;
+            card += `📦 Novo cadastro`;
+        } else if (item.acao === 'preco_atualizado' && item.produtoExistente) {
+            const precoAntigo = `R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')} / ${item.produtoExistente.unidade}`;
+            card += `🔄 ${num} *${nomeExibido}*\n`;
+            card += `💰 ${rotuloFonte}: *${precoFoto}*\n`;
+            card += `📦 Estoque: ${precoAntigo}\n`;
+            card += `↪️ Atualizar preço`;
+        } else if (item.acao === 'sem_alteracao' && item.produtoExistente) {
+            const precoEstoque = `R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')} / ${item.produtoExistente.unidade}`;
+            card += `⏭️ ${num} *${nomeExibido}*\n`;
+            card += `💰 ${rotuloFonte}: *${precoFoto}*\n`;
+            card += `📦 Estoque: ${precoEstoque}\n`;
+            card += `Sem alteração`;
+        } else if (item.acao === 'ambiguo') {
+            const numSimilares = item.similares?.length ?? '?';
+            card += `⚠️ ${num} *${item.nome}*\n`;
+            card += `💰 ${rotuloFonte}: *${precoFoto}*\n`;
+            card += `📦 ${numSimilares} produto(s) parecido(s) no estoque\n`;
+            card += `Precisa escolher qual atualizar`;
+        } else {
+            // fallback genérico
+            card += `📌 ${num} *${item.nome}*\n`;
+            card += `💰 ${rotuloFonte}: *${precoFoto}*`;
+        }
+
+        return card;
     }
 
     // ============================================================
@@ -428,7 +493,6 @@ JSON:`;
                 if (similares.length > 1) {
                     alteracao.similares = similares;
                     alteracao.acao = 'ambiguo';
-                    linhas.push(`${i + 1}. ${item.nome}\n   ⚠️ ${similares.length} opções no estoque (Foto: R$ ${item.preco.toFixed(2).replace('.', ',')}) → ⚠️ Ambíguo`);
                 } else {
                     const maisProximo = similares[0];
                     alteracao.produtoExistente = {
@@ -437,18 +501,10 @@ JSON:`;
                         preco: maisProximo.preco,
                         unidade: maisProximo.unidade,
                     };
-
-                    if (maisProximo.preco === item.preco) {
-                        alteracao.acao = 'sem_alteracao';
-                        linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ⏭️ Sem alteração`);
-                    } else {
-                        alteracao.acao = 'preco_atualizado';
-                        linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → 🔄 Atualizar`);
-                    }
+                    alteracao.acao = maisProximo.preco === item.preco ? 'sem_alteracao' : 'preco_atualizado';
                 }
             } else {
                 alteracao.acao = 'novo_cadastro';
-                linhas.push(`${i + 1}. ${item.nome}\n   Estoque: (não existe) | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ✅ Novo`);
             }
 
             alteracoes.push(alteracao);
@@ -459,19 +515,23 @@ JSON:`;
             return;
         }
 
-        const linhasAgrupadas = linhas.slice(0, 30).join('\n');
-        const sufixo = linhas.length > 30 ? `\n\n...e mais ${linhas.length - 30} item(s).` : '';
         const totalNovos = alteracoes.filter(a => a.acao === 'novo_cadastro').length;
         const totalAtualizar = alteracoes.filter(a => a.acao === 'preco_atualizado').length;
         const totalIgual = alteracoes.filter(a => a.acao === 'sem_alteracao').length;
         const totalAmbiguo = alteracoes.filter(a => a.acao === 'ambiguo').length;
 
-        let resumo = `📋 *Resumo das alterações:*\n\n`;
-        if (totalNovos > 0) resumo += `✅ Novo(s): ${totalNovos}\n`;
-        if (totalAtualizar > 0) resumo += `🔄 Atualizar: ${totalAtualizar}\n`;
-        if (totalIgual > 0) resumo += `⏭️ Sem alteração: ${totalIgual}\n`;
-        if (totalAmbiguo > 0) resumo += `⚠️ Ambíguo(s): ${totalAmbiguo}\n`;
-        resumo += `\n${linhasAgrupadas}${sufixo}`;
+        const cards = alteracoes.slice(0, 30).map((a, i) => formatarCartaoProduto(a, i)).join('\n');
+        const sufixo = alteracoes.length > 30 ? `\n\n...e mais ${alteracoes.length - 30} item(s).` : '';
+
+        const contadorLinhas: string[] = [];
+        if (totalNovos > 0) contadorLinhas.push(`✅ ${totalNovos} novo(s)`);
+        if (totalAtualizar > 0) contadorLinhas.push(`🔄 ${totalAtualizar} atualizar`);
+        if (totalIgual > 0) contadorLinhas.push(`⏭️ ${totalIgual} sem alteração`);
+        if (totalAmbiguo > 0) contadorLinhas.push(`⚠️ ${totalAmbiguo} ambíguo(s)`);
+
+        let resumo = `📋 *Resumo — ${alteracoes.length} produto(s)*\n`;
+        resumo += contadorLinhas.join('  |  ') + '\n\n';
+        resumo += cards + sufixo;
 
         await salvarContexto(from, {
             ...contexto,
@@ -496,12 +556,15 @@ async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: 
     const similares = await buscarProdutosSimilares(loja.id, produto.nome);
 
     if (similares.length > 0) {
-        let listaMsg = '🔍 Encontrei produtos parecidos. Responda com o *número*:\n\n';
+        let listaMsg = '🔍 *Encontrei produtos parecidos no estoque*\nResponda com o número correspondente:\n\n';
         for (let i = 0; i < similares.length; i++) {
             const s = similares[i];
-            listaMsg += `${i + 1} - ${s.produto_nome} (R$ ${s.preco} / ${s.unidade})\n`;
+            listaMsg += `───────────────\n`;
+            listaMsg += `*${i + 1}* - ${s.produto_nome}\n`;
+            listaMsg += `📦 Estoque: R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade}\n`;
         }
-        listaMsg += '\n0 - Nenhum (cadastrar novo)';
+        listaMsg += `───────────────\n`;
+        listaMsg += `*0* - Nenhum (cadastrar como novo)`;
 
         await salvarContexto(from, {
             ...contexto,
@@ -816,11 +879,14 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         
         // Se o item tem múltiplas opções (ambíguo), mostra a lista para desempate
         if (itemEscolhido.acao === 'ambiguo' && itemEscolhido.similares && itemEscolhido.similares.length > 1) {
-            let msgOpcoes = `⚠️ Encontrei ${itemEscolhido.similares.length} opções no seu estoque. Qual é o da foto?\n\n`;
+            let msgOpcoes = `⚠️ *Encontrei ${itemEscolhido.similares.length} opções no estoque*\nQual delas é a correspondente?\n\n`;
             itemEscolhido.similares.forEach((s: any, idx: number) => {
-                msgOpcoes += `${idx + 1} - ${s.produto_nome} (R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade})\n`;
+                msgOpcoes += `───────────────\n`;
+                msgOpcoes += `*${idx + 1}* - ${s.produto_nome}\n`;
+                msgOpcoes += `📦 Estoque: R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade}\n`;
             });
-            msgOpcoes += `\n0 - Nenhum (cadastrar como novo)`;
+            msgOpcoes += `───────────────\n`;
+            msgOpcoes += `*0* - Nenhum (cadastrar como novo)`;
             
             await salvarContexto(from, {
                 ...contexto,
@@ -894,38 +960,26 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             });
             
             // Reconstruir resumo com detalhes
-            let novoResumo = `📋 *Resumo atualizado:*\n\n`;
             let novos = 0, atualizados = 0, iguais = 0, ambiguos = 0;
-            lista.forEach((item: any, i: number) => {
-                const simbolo = item.acao === 'novo_cadastro' ? '✅' : item.acao === 'preco_atualizado' ? '🔄' : item.acao === 'ambiguo' ? '⚠️' : '⏭️';
-                
-                let linha = `${i + 1}. ${item.nome} → R$ ${item.precoFoto.toFixed(2).replace('.', ',')} ${simbolo}`;
-                
-                if (item.acao === 'ambiguo' && item.similares) {
-                    linha += `\n   ⚠️ ${item.similares.length} opções no estoque`;
-                } else if (item.acao === 'preco_atualizado' && item.produtoExistente) {
-                    linha += `\n   Estoque: ${item.produtoExistente.produto_nome} (R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')})`;
-                } else if (item.acao === 'sem_alteracao' && item.produtoExistente) {
-                    linha += `\n   Estoque: ${item.produtoExistente.produto_nome} (R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')})`;
-                } else if (item.acao === 'novo_cadastro') {
-                    linha += `\n   Estoque: (não existe)`;
-                }
-                
-                novoResumo += linha + '\n';
+            lista.forEach((item: any) => {
                 if (item.acao === 'novo_cadastro') novos++;
                 else if (item.acao === 'preco_atualizado') atualizados++;
                 else if (item.acao === 'sem_alteracao') iguais++;
                 else ambiguos++;
             });
+
+            const contLinhas: string[] = [];
+            if (novos > 0) contLinhas.push(`✅ ${novos} novo(s)`);
+            if (atualizados > 0) contLinhas.push(`🔄 ${atualizados} atualizar`);
+            if (iguais > 0) contLinhas.push(`⏭️ ${iguais} iguais`);
+            if (ambiguos > 0) contLinhas.push(`⚠️ ${ambiguos} ambíguo(s)`);
+
+            const cardsAtualizados = lista.map((item: any, i: number) => formatarCartaoProduto(item, i)).join('\n');
+            let novoResumo = `📋 *Resumo atualizado — ${lista.length} produto(s)*\n`;
+            novoResumo += contLinhas.join('  |  ') + '\n\n';
+            novoResumo += cardsAtualizados;
             
-            // Contador
-            let contadores = '';
-            if (novos > 0) contadores += `✅ Novo(s): ${novos} `;
-            if (atualizados > 0) contadores += `🔄 Atualizar: ${atualizados} `;
-            if (iguais > 0) contadores += `⏭️ Iguais: ${iguais} `;
-            if (ambiguos > 0) contadores += `⚠️ Ambíguos: ${ambiguos}`;
-            
-            await sendTextMessage(from, `✅ Escolha registrada!\n\n${contadores}\n\n${novoResumo}`);
+            await sendTextMessage(from, `✅ Escolha registrada!\n\n${novoResumo}`);
             await delay(300);
             await sendInteractiveButtons(from, `O que deseja fazer agora?`, [
                 { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar Todos' },
@@ -977,25 +1031,25 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             acao: undefined,
         });
         
-        let novoResumo = `📋 *Resumo atualizado:*\n\n`;
-        lista.forEach((item: any, i: number) => {
-            const simbolo = item.acao === 'novo_cadastro' ? '✅' : item.acao === 'preco_atualizado' ? '🔄' : item.acao === 'ambiguo' ? '⚠️' : '⏭️';
-            
-            let linha = `${i + 1}. ${item.nome} → R$ ${item.precoFoto.toFixed(2).replace('.', ',')} ${simbolo}`;
-            
-            if (item.acao === 'ambiguo' && item.similares) {
-                linha += `\n   ⚠️ ${item.similares.length} opções no estoque`;
-            } else if (item.acao === 'preco_atualizado' && item.produtoExistente) {
-                linha += `\n   Estoque: ${item.produtoExistente.produto_nome} (R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')})`;
-            } else if (item.acao === 'sem_alteracao' && item.produtoExistente) {
-                linha += `\n   Estoque: ${item.produtoExistente.produto_nome} (R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')})`;
-            } else if (item.acao === 'novo_cadastro') {
-                linha += `\n   Estoque: (não existe)`;
-            }
-            
-            novoResumo += linha + '\n';
+        let novos2 = 0, atualizados2 = 0, iguais2 = 0, ambiguos2 = 0;
+        lista.forEach((item: any) => {
+            if (item.acao === 'novo_cadastro') novos2++;
+            else if (item.acao === 'preco_atualizado') atualizados2++;
+            else if (item.acao === 'sem_alteracao') iguais2++;
+            else ambiguos2++;
         });
-        
+
+        const contLinhas2: string[] = [];
+        if (novos2 > 0) contLinhas2.push(`✅ ${novos2} novo(s)`);
+        if (atualizados2 > 0) contLinhas2.push(`🔄 ${atualizados2} atualizar`);
+        if (iguais2 > 0) contLinhas2.push(`⏭️ ${iguais2} iguais`);
+        if (ambiguos2 > 0) contLinhas2.push(`⚠️ ${ambiguos2} ambíguo(s)`);
+
+        const cardsEdit = lista.map((item: any, i: number) => formatarCartaoProduto(item, i)).join('\n');
+        let novoResumo = `📋 *Resumo atualizado — ${lista.length} produto(s)*\n`;
+        novoResumo += contLinhas2.join('  |  ') + '\n\n';
+        novoResumo += cardsEdit;
+
         await sendTextMessage(from, `${mensagemFeedback}\n\n${novoResumo}`);
         await delay(300);
         await sendInteractiveButtons(from, `O que deseja fazer agora?`, [
@@ -1025,7 +1079,6 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             await sendTextMessage(from, `⏳ Verificando *${itens.length}* produto(s) no estoque...`);
             
             const alteracoes: AlteracaoPlanejada[] = [];
-            const linhas: string[] = [];
             
             for (let i = 0; i < itens.length; i++) {
                 const item = itens[i];
@@ -1040,11 +1093,9 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 };
                 
                 if (similares.length > 0) {
-                    // Verifica se há ambiguidade (múltiplos resultados)
                     if (similares.length > 1) {
                         alteracao.similares = similares;
                         alteracao.acao = 'ambiguo';
-                        linhas.push(`${i + 1}. ${item.nome}\n   ⚠️ ${similares.length} opções no estoque (Foto: R$ ${item.preco.toFixed(2).replace('.', ',')}) → ⚠️ Ambíguo`);
                     } else {
                         const maisProximo = similares[0];
                         alteracao.produtoExistente = {
@@ -1056,15 +1107,12 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                         
                         if (maisProximo.preco === item.preco) {
                             alteracao.acao = 'sem_alteracao';
-                            linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ⏭️ Sem alteração`);
                         } else {
                             alteracao.acao = 'preco_atualizado';
-                            linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → 🔄 Atualizar`);
                         }
                     }
                 } else {
                     alteracao.acao = 'novo_cadastro';
-                    linhas.push(`${i + 1}. ${item.nome}\n   Estoque: (não existe) | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ✅ Novo cadastro`);
                 }
                 
                 alteracoes.push(alteracao);
@@ -1077,19 +1125,23 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 return;
             }
             
-            const linhasAgrupadas = linhas.slice(0, 30).join('\n');
-            const sufixo = linhas.length > 30 ? `\n\n...e mais ${linhas.length - 30} item(s).` : '';
             const totalNovos = alteracoes.filter(a => a.acao === 'novo_cadastro').length;
             const totalAtualizar = alteracoes.filter(a => a.acao === 'preco_atualizado').length;
             const totalIgual = alteracoes.filter(a => a.acao === 'sem_alteracao').length;
             const totalAmbiguo = alteracoes.filter(a => a.acao === 'ambiguo').length;
             
-            let resumo = `📋 *Resumo das alterações:*\n\n`;
-            if (totalNovos > 0) resumo += `✅ Novo(s): ${totalNovos}\n`;
-            if (totalAtualizar > 0) resumo += `🔄 Atualizar: ${totalAtualizar}\n`;
-            if (totalIgual > 0) resumo += `⏭️ Sem alteração: ${totalIgual}\n`;
-            if (totalAmbiguo > 0) resumo += `⚠️ Ambíguo(s): ${totalAmbiguo}\n`;
-            resumo += `\n${linhasAgrupadas}${sufixo}`;
+            const cardsCsv = alteracoes.slice(0, 30).map((a, i) => formatarCartaoProduto(a, i, 'texto')).join('\n');
+            const sufixoCsv = alteracoes.length > 30 ? `\n\n...e mais ${alteracoes.length - 30} item(s).` : '';
+
+            const contLinhasCsv: string[] = [];
+            if (totalNovos > 0) contLinhasCsv.push(`✅ ${totalNovos} novo(s)`);
+            if (totalAtualizar > 0) contLinhasCsv.push(`🔄 ${totalAtualizar} atualizar`);
+            if (totalIgual > 0) contLinhasCsv.push(`⏭️ ${totalIgual} sem alteração`);
+            if (totalAmbiguo > 0) contLinhasCsv.push(`⚠️ ${totalAmbiguo} ambíguo(s)`);
+
+            let resumo = `📋 *Resumo — ${alteracoes.length} produto(s)*\n`;
+            resumo += contLinhasCsv.join('  |  ') + '\n\n';
+            resumo += cardsCsv + sufixoCsv;
             
             await salvarContexto(from, {
                 ...contexto,
@@ -1435,7 +1487,6 @@ JSON:`;
         await sendTextMessage(from, `⏳ Verificando *${itensValidos.length}* produto(s) no estoque...`);
 
         const alteracoes: AlteracaoPlanejada[] = [];
-        const linhas: string[] = [];
 
         for (let i = 0; i < itensValidos.length; i++) {
             const item = itensValidos[i];
@@ -1454,7 +1505,6 @@ JSON:`;
                 if (similares.length > 1) {
                     alteracao.similares = similares;
                     alteracao.acao = 'ambiguo';
-                    linhas.push(`${i + 1}. ${item.nome}\n   ⚠️ ${similares.length} opções no estoque (Foto: R$ ${item.preco.toFixed(2).replace('.', ',')}) → ⚠️ Ambíguo`);
                 } else {
                     const maisProximo = similares[0];
                     alteracao.produtoExistente = {
@@ -1463,18 +1513,10 @@ JSON:`;
                         preco: maisProximo.preco,
                         unidade: maisProximo.unidade,
                     };
-
-                    if (maisProximo.preco === item.preco) {
-                        alteracao.acao = 'sem_alteracao';
-                        linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ⏭️ Sem alteração`);
-                    } else {
-                        alteracao.acao = 'preco_atualizado';
-                        linhas.push(`${i + 1}. ${item.nome}\n   Estoque: R$ ${maisProximo.preco.toFixed(2).replace('.', ',')} | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → 🔄 Atualizar`);
-                    }
+                    alteracao.acao = maisProximo.preco === item.preco ? 'sem_alteracao' : 'preco_atualizado';
                 }
             } else {
                 alteracao.acao = 'novo_cadastro';
-                linhas.push(`${i + 1}. ${item.nome}\n   Estoque: (não existe) | Foto: R$ ${item.preco.toFixed(2).replace('.', ',')} → ✅ Novo`);
             }
 
             alteracoes.push(alteracao);
@@ -1487,19 +1529,26 @@ JSON:`;
             return;
         }
 
-        const linhasAgrupadas = linhas.slice(0, 30).join('\n');
-        const sufixo = linhas.length > 30 ? `\n\n...e mais ${linhas.length - 30} item(s).` : '';
         const totalNovos = alteracoes.filter(a => a.acao === 'novo_cadastro').length;
         const totalAtualizar = alteracoes.filter(a => a.acao === 'preco_atualizado').length;
         const totalIgual = alteracoes.filter(a => a.acao === 'sem_alteracao').length;
         const totalAmbiguo = alteracoes.filter(a => a.acao === 'ambiguo').length;
 
-        let resumo = `📋 *Resumo das alterações:*\n\n`;
-        if (totalNovos > 0) resumo += `✅ Novo(s): ${totalNovos}\n`;
-        if (totalAtualizar > 0) resumo += `🔄 Atualizar: ${totalAtualizar}\n`;
-        if (totalIgual > 0) resumo += `⏭️ Sem alteração: ${totalIgual}\n`;
-        if (totalAmbiguo > 0) resumo += `⚠️ Ambíguo(s): ${totalAmbiguo}\n`;
-        resumo += `\n${linhasAgrupadas}${sufixo}`;
+        const cardsFoto = alteracoes.slice(0, 30).map((a, i) => {
+            const srcFonte: 'foto' | 'audio' = mimeType.startsWith('image') ? 'foto' : 'audio';
+            return formatarCartaoProduto(a, i, srcFonte);
+        }).join('\n');
+        const sufixoFoto = alteracoes.length > 30 ? `\n\n...e mais ${alteracoes.length - 30} item(s).` : '';
+
+        const contLinhasFoto: string[] = [];
+        if (totalNovos > 0) contLinhasFoto.push(`✅ ${totalNovos} novo(s)`);
+        if (totalAtualizar > 0) contLinhasFoto.push(`🔄 ${totalAtualizar} atualizar`);
+        if (totalIgual > 0) contLinhasFoto.push(`⏭️ ${totalIgual} sem alteração`);
+        if (totalAmbiguo > 0) contLinhasFoto.push(`⚠️ ${totalAmbiguo} ambíguo(s)`);
+
+        let resumo = `📋 *Resumo — ${alteracoes.length} produto(s)*\n`;
+        resumo += contLinhasFoto.join('  |  ') + '\n\n';
+        resumo += cardsFoto + sufixoFoto;
 
         await salvarContexto(from, {
             ...contexto,
