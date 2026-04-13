@@ -16,7 +16,7 @@ import {
     liberarLock,
     cache,
 } from '../lib/redis-cloud.js';
-import { supabase } from '../lib/supabase.js';
+import { supabaseAdmin as supabase } from '../lib/supabase.js';
 import { EstadosFluxo } from './types.js';
 import { logger, logTokens } from '../lib/logger.js';
 import {
@@ -617,16 +617,36 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     logger.debug({ from, estado: contexto?.estado ?? 'IDLE', tipo: msg.type, texto: userMessageText || '[media]' }, '[processMessage]');
 
     // ══════════════════════════════════════════════════════════
-    // INTERCEPTADOR DE CSV (Sprint 14 - Scale_Up)
+    // INTERCEPTADOR DE DOCUMENTOS (CSV/Excel) - Sprint 14
     // ══════════════════════════════════════════════════════════
     if (msg.type === 'document') {
         const doc = (msg as any).document;
-        if (doc && (doc.mime_type === 'text/csv' || doc?.filename?.endsWith('.csv'))) {
-            await sendTextMessage(from, '⏳ Identifiquei um arquivo CSV! Entrando no modo de extração em lote. Processando...');
-            const { processarCSV } = await import('../processor/csvProcessor.js');
-            await processarCSV(msg, from, loja, contexto);
+        const filename = doc?.filename?.toLowerCase() || '';
+        const isProcessable = doc?.mime_type === 'text/csv' || 
+                             filename.endsWith('.csv') || 
+                             filename.endsWith('.xlsx') || 
+                             filename.endsWith('.xlsm') || 
+                             filename.endsWith('.xls');
+
+        if (doc && isProcessable) {
+            await sendTextMessage(from, '⏳ Identifiquei uma planilha! Entrando no modo de extração em lote...');
+            const { processarDocumento } = await import('../processor/documentProcessor.js');
+            await processarDocumento(msg, from, loja, contexto);
             return;
         }
+
+        // Documento não suportado (PDF, Word, etc) → rejeitar sem cair no fluxo genérico
+        await sendTextMessage(from,
+            '❌ Esse tipo de arquivo não é suportado.\n\n' +
+            '📄 *Formatos aceitos para catálogo:*\n' +
+            '  • Planilha Excel: *.xlsx, .xlsm, .xls*\n' +
+            '  • Texto CSV: *.csv*\n\n' +
+            'Para cadastrar um produto, você também pode:\n' +
+            '  📷 Tirar uma *foto* do encarte\n' +
+            '  🎙️ Enviar um *áudio* com os dados\n' +
+            '  ✍️ *Digitar* o nome, preço e unidade'
+        );
+        return;
     }
 
     // ══════════════════════════════════════════════════════════
@@ -698,8 +718,8 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     // CENÁRIO 1/8/12: Estado IDLE
     // ══════════════════════════════════════════════════════════
     if (!contexto || contexto.estado === EstadosFluxo.IDLE) {
-        // Sprint 1 #7/8: tipos de mídia ou localização em IDLE → bloquear sem baixar
-        if (isMediaOnly || msg.type === 'location' || msg.type === 'contacts' || msg.type === 'document') {
+        // Sprint 1 #7/8: tipos de mídia ou localização em IDLE → bloquear sem baixar (document já interceptado acima)
+        if (isMediaOnly || msg.type === 'location' || msg.type === 'contacts') {
             const lockAdquirido = await adquirirLock(`menu_lock:${from}`, 8);
             if (!lockAdquirido) {
                 logger.info({ from }, '[Cenário 8] Rajada bloqueada (lock anti-spam)');
@@ -724,13 +744,14 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             return;
         }
 
-        // Texto em IDLE → enviar menu
+        // Texto em IDLE: só envia menu se houver conteúdo real (ignora eventos de sistema vazios)
         if (isTextOnly && userMessageText.trim()) {
             await enviarMenu(loja.nome, from);
             return;
         }
 
-        await enviarMenu(loja.nome, from);
+        // Qualquer outra coisa (tipo desconhecido, evento vazio, etc.) → silêncio total
+        logger.info({ from, tipo: msg.type }, '[IDLE] Evento ignorado (sem conteúdo válido)');
         return;
     }
 
@@ -867,10 +888,52 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     // ════════════════════════════════════════════════════════════════
     if (contexto.estado === EstadosFluxo.AGUARDANDO_SELECAO_EDICAO) {
         const lista = contexto.alteracoesPlanejadas ?? [];
-        const numeroDigitado = parseInt(userMessageText.trim(), 10);
+        
+        const textoNum = userMessageText.trim().toLowerCase();
+        let numeroDigitado = parseInt(textoNum, 10);
+        
+        // Mapa NLP rápido
+        const mapaPalavras: Record<string, number> = {
+            'primeiro': 1, 'um': 1, 'primeira': 1,
+            'segundo': 2, 'dois': 2, 'segunda': 2,
+            'terceiro': 3, 'três': 3, 'terceira': 3,
+            'quarto': 4, 'quatro': 4, 'quarta': 4,
+            'quinto': 5, 'cinco': 5, 'quinta': 5,
+        };
+        
+        if (isNaN(numeroDigitado) && mapaPalavras[textoNum]) {
+            numeroDigitado = mapaPalavras[textoNum]!;
+        }
         
         if (isNaN(numeroDigitado) || numeroDigitado < 1 || numeroDigitado > lista.length) {
-            await sendTextMessage(from, `⚠️ Número inválido. Digite um número entre *1* e *${lista.length}*.`);
+            // Sprint 14: NLP Fallback para o Menu Cego na edição
+            if (userMessageText.trim()) {
+                const listaNomes = lista.map((a, i) => `${i + 1} - ${a.nome}`).join('\n');
+                try {
+                    const result = await ai.models.generateContent({
+                        model: GEMINI_MODEL,
+                        contents: `O usuário quer selecionar um item para EDITAR numa lista de compras/estoque.\nLista:\n${listaNomes}\n\nEle respondeu: "${userMessageText}"\n\nQual o número correspondente ao item que ele quer? Retorne EXATAMENTE o JSON: {"escolha": inteiro, "cancelar": boolean}.\nRegras:\n1. Se ele quer cancelar/parar, retorne "cancelar": true.\n2. Se não for possível identificar, retorne "escolha": -1.`,
+                        config: { responseMimeType: 'application/json' },
+                    });
+                    logTokens('nlp_selecao_edicao', from, loja?.id ?? 'unknown', result.usageMetadata);
+                    const nlp = parseSafe(NLPEscolhaSchema, result.text || '{}', { escolha: -1, cancelar: false });
+
+                    if (nlp.cancelar === true) {
+                        await executarFuga(from, loja);
+                        return;
+                    }
+
+                    if (Number.isInteger(nlp.escolha) && nlp.escolha >= 1 && nlp.escolha <= lista.length) {
+                        // Recomeça o processamento com o número injetado
+                        await processMessage({ ...msg, text: { body: String(nlp.escolha) } });
+                        return;
+                    }
+                } catch (e) {
+                    logger.error({ e }, '[NLP Selecao Edicao] Erro fallback');
+                }
+            }
+            
+            await sendTextMessage(from, `⚠️ Não entendi qual item você quer editar. Digite o número entre *1* e *${lista.length}* ou o nome do produto.`);
             return;
         }
         
@@ -922,10 +985,49 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             const [indiceStr] = contexto.acao.split('_');
             const indiceReal = parseInt(indiceStr, 10);
             const item = lista[indiceReal];
-            const opcaoNum = parseInt(userMessageText.trim(), 10);
+            const textoLimpo = userMessageText.trim().toLowerCase();
+            let opcaoNum = parseInt(textoLimpo, 10);
+            
+            // Mapa NLP estático interno
+            const mapaPalavras: Record<string, number> = {
+                'nenhum': 0, 'novo': 0, 'nenhuma': 0, 'zero': 0,
+                'primeiro': 1, 'um': 1, 'primeira': 1,
+                'segundo': 2, 'dois': 2, 'segunda': 2,
+                'terceiro': 3, 'três': 3, 'terceira': 3,
+            };
+
+            if (isNaN(opcaoNum) && mapaPalavras[textoLimpo] !== undefined) {
+                opcaoNum = mapaPalavras[textoLimpo]!;
+            }
             
             if (isNaN(opcaoNum) || opcaoNum < 0 || opcaoNum > (item.similares?.length ?? 0)) {
-                await sendTextMessage(from, `⚠️ Número inválido. Digite entre *0* e *${item.similares?.length}*.`);
+                // Sprint 14: NLP Fallback para Desempate na edição
+                if (userMessageText.trim()) {
+                    const listaSimilares = item.similares!.map((s, i) => `${i + 1} - ${s.produto_nome}`).concat(['0 - Nenhum (Novo)']).join('\n');
+                    try {
+                        const result = await ai.models.generateContent({
+                            model: GEMINI_MODEL,
+                            contents: `O usuário quer escolher um produto similar no estoque.\nOpções:\n${listaSimilares}\n\nResposta: "${userMessageText}"\n\nRegras:\n- Se o usuário der a entender que quer "Nenhum" ou criar um "Novo" produto que não está na lista, a escolha é 0.\n- Retorne JSON: {"escolha": inteiro, "cancelar": boolean}.\n- Só retorne cancelar=true se o usuário quiser explicitamente desistir/cancelar/parar o processo todo.`,
+                            config: { responseMimeType: 'application/json' },
+                        });
+                        logTokens('nlp_desempate_edicao', from, loja?.id ?? 'unknown', result.usageMetadata);
+                        const nlp = parseSafe(NLPEscolhaSchema, result.text || '{}', { escolha: -1, cancelar: false });
+
+                        if (nlp.cancelar === true) {
+                            await executarFuga(from, loja);
+                            return;
+                        }
+
+                        if (Number.isInteger(nlp.escolha) && nlp.escolha >= 0 && nlp.escolha <= (item.similares?.length ?? 0)) {
+                            await processMessage({ ...msg, text: { body: String(nlp.escolha) } });
+                            return;
+                        }
+                    } catch (e) {
+                         logger.error({ e }, '[NLP Desempate Edicao] Erro fallback');
+                    }
+                }
+
+                await sendTextMessage(from, `⚠️ Escolha inválida. Digite um número entre *0* e *${item.similares?.length}* ou o nome da opção desejada.`);
                 return;
             }
             
@@ -1060,119 +1162,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         return;
     }
 
-    // CONFIRMAÇÃO INICIAL DE PRODUTOS EXTRAÍDOS DE FOTO/ÁUDIO
-    // ════════════════════════════════════════════════════════════════
-    if (contexto.estado === EstadosFluxo.AGUARDANDO_CONFIRMACAO_MULTIMODAL) {
-        const itens = contexto.itensPendenteConfirmacao ?? [];
 
-        const confirmou = isInteractive && buttonId === 'confirmar_multimodal_sim';
-        const cancelou  = isInteractive && buttonId === 'confirmar_multimodal_nao';
-
-        if (confirmou) {
-            if (itens.length === 0) {
-                await sendTextMessage(from, 'Não encontrei produtos para salvar. Tente novamente.');
-                await limparContexto(from);
-                await enviarMenu(loja.nome, from);
-                return;
-            }
-            
-            await sendTextMessage(from, `⏳ Verificando *${itens.length}* produto(s) no estoque...`);
-            
-            const alteracoes: AlteracaoPlanejada[] = [];
-            
-            for (let i = 0; i < itens.length; i++) {
-                const item = itens[i];
-                if (!item.nome || item.preco <= 0) continue;
-                
-                const similares = await buscarProdutosSimilares(loja.id, item.nome);
-                const alteracao: AlteracaoPlanejada = {
-                    nome: item.nome,
-                    precoFoto: item.preco,
-                    unidade: item.unidade,
-                    acao: 'sem_alteracao',
-                };
-                
-                if (similares.length > 0) {
-                    if (similares.length > 1) {
-                        alteracao.similares = similares;
-                        alteracao.acao = 'ambiguo';
-                    } else {
-                        const maisProximo = similares[0];
-                        alteracao.produtoExistente = {
-                            id: maisProximo.id,
-                            produto_nome: maisProximo.produto_nome,
-                            preco: maisProximo.preco,
-                            unidade: maisProximo.unidade,
-                        };
-                        
-                        if (maisProximo.preco === item.preco) {
-                            alteracao.acao = 'sem_alteracao';
-                        } else {
-                            alteracao.acao = 'preco_atualizado';
-                        }
-                    }
-                } else {
-                    alteracao.acao = 'novo_cadastro';
-                }
-                
-                alteracoes.push(alteracao);
-            }
-            
-            if (alteracoes.length === 0) {
-                await sendTextMessage(from, 'Nenhum produto válido encontrado.');
-                await limparContexto(from);
-                await enviarMenu(loja.nome, from);
-                return;
-            }
-            
-            const totalNovos = alteracoes.filter(a => a.acao === 'novo_cadastro').length;
-            const totalAtualizar = alteracoes.filter(a => a.acao === 'preco_atualizado').length;
-            const totalIgual = alteracoes.filter(a => a.acao === 'sem_alteracao').length;
-            const totalAmbiguo = alteracoes.filter(a => a.acao === 'ambiguo').length;
-            
-            const cardsCsv = alteracoes.slice(0, 30).map((a, i) => formatarCartaoProduto(a, i, 'texto')).join('\n');
-            const sufixoCsv = alteracoes.length > 30 ? `\n\n...e mais ${alteracoes.length - 30} item(s).` : '';
-
-            const contLinhasCsv: string[] = [];
-            if (totalNovos > 0) contLinhasCsv.push(`✅ ${totalNovos} novo(s)`);
-            if (totalAtualizar > 0) contLinhasCsv.push(`🔄 ${totalAtualizar} atualizar`);
-            if (totalIgual > 0) contLinhasCsv.push(`⏭️ ${totalIgual} sem alteração`);
-            if (totalAmbiguo > 0) contLinhasCsv.push(`⚠️ ${totalAmbiguo} ambíguo(s)`);
-
-            let resumo = `📋 *Resumo — ${alteracoes.length} produto(s)*\n`;
-            resumo += contLinhasCsv.join('  |  ') + '\n\n';
-            resumo += cardsCsv + sufixoCsv;
-            
-            await salvarContexto(from, {
-                ...contexto,
-                estado: EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES,
-                alteracoesPlanejadas: alteracoes,
-            });
-            
-            await sendTextMessage(from, resumo);
-            await delay(300);
-            await sendInteractiveButtons(from, `⚡ Confirma as alterações acima?`, [
-                { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar Todos' },
-                { id: 'editar_item_lista', title: '✏️ Editar um Item' },
-                { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar Tudo' },
-            ]);
-            return;
-        }
-
-        if (cancelou) {
-            await sendTextMessage(from, '❌ Cadastro cancelado. Nada foi salvo.');
-            await limparContexto(from);
-            await delay(400);
-            await enviarMenu(loja.nome, from);
-            return;
-        }
-
-        await sendInteractiveButtons(from, `Confirme: deseja salvar *${itens.length}* produto(s) no catálogo?`, [
-            { id: 'confirmar_multimodal_sim', title: '✅ Salvar todos' },
-            { id: 'confirmar_multimodal_nao', title: '❌ Cancelar' },
-        ]);
-        return;
-    }
 
     // ══════════════════════════════════════════════════════════
     // CENÁRIO 2/3/10/11: Aguardando dados do produto
@@ -1427,6 +1417,8 @@ async function processarMidia(msg: WhatsAppMessage, from: string, loja: any, con
     }
 
     try {
+        await sendTextMessage(from, '👀 Recebi sua mídia! Me dê uns segundinhos enquanto leio os dados...');
+        
         // Sprint 11 #2: download para Buffer (RAM), nunca disco
         const buffer = await downloadMedia(mediaInfo.id);
         const base64 = buffer.toString('base64');
@@ -1610,18 +1602,17 @@ async function buscarProdutosSimilares(
         logger.warn({ err }, '[Similares] Erro no pg_trgm, degradando para full-scan');
     }
 
-    // ── Fallback: full-scan se pg_trgm não retornou resultados ──
+    // ── Fallback: full-scan em catalogo_ativo (1 linha por produto, sem DISTINCT ON) ──
     if (candidatos.length === 0) {
         const { data, error } = await supabase
-            .from('catalogo_historico')
+            .from('catalogo_ativo')
             .select('id, produto_nome, preco, unidade')
             .eq('loja_id', lojaId)
-            .eq('disponivel', true)
-            .order('registrado_em', { ascending: false });
+            .eq('disponivel', true);
 
         if (error || !data || data.length === 0) return [];
         candidatos = data;
-        logger.info({ lojaId, totalProdutos: candidatos.length }, '[Similares] Full-scan ativado');
+        logger.info({ lojaId, totalProdutos: candidatos.length }, '[Similares] Full-scan em catalogo_ativo ativado');
     }
 
     if (candidatos.length === 0) return [];
@@ -1650,93 +1641,158 @@ async function buscarProdutosSimilares(
 }
 
 
-/** Sprint 2 #9: INSERT com truncate de segurança e deduplication (Sprint 15) */
+/**
+ * Ingere produto no catalogo_ativo via UPSERT (1 linha por produto).
+ * Se houve mudança de preço, registra trilha de auditoria no catalogo_historico.
+ * Deduplication: ignora se mesmo nome+preço já está ativo no snapshot.
+ */
 async function ingeriCatalogo(lojaId: string, produto: DadosProduto, fonte: string = 'manual'): Promise<{ inserido: boolean }> {
-    // Deduplication: ignora se já existe com o mesmo nome e preço nas últimas 24h
-    const { data: existente } = await supabase
-        .from('catalogo_historico')
-        .select('id')
-        .eq('loja_id', lojaId)
-        .ilike('produto_nome', produto.nome.substring(0, 250))
-        .eq('preco', produto.preco)
-        .eq('disponivel', true)
-        .gte('criado_em', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
-        .limit(1);
+    const nomeSeguro    = produto.nome.substring(0, 250);
+    const unidadeSegura = (produto.unidade || 'un').substring(0, 30);
 
-    if (existente && existente.length > 0) {
-        logger.info({ lojaId, nome: produto.nome, preco: produto.preco }, '[Ledger] Duplicata ignorada (mesmo preço nas últimas 24h)');
+    // ── Deduplication: busca estado atual no snapshot ──
+    const { data: ativo } = await supabase
+        .from('catalogo_ativo')
+        .select('id, preco')
+        .eq('loja_id', lojaId)
+        .ilike('produto_nome', nomeSeguro)
+        .eq('disponivel', true)
+        .limit(1)
+        .maybeSingle();
+
+    const precoMudou = !ativo || Math.abs(Number(ativo.preco) - produto.preco) > 0.001;
+
+    if (!precoMudou) {
+        logger.info({ lojaId, nome: nomeSeguro, preco: produto.preco }, '[Ledger] Sem alteração de preço — snapshot preservado');
         return { inserido: false };
     }
 
-    const payload = {
-        loja_id:        lojaId,
-        produto_nome:   produto.nome.substring(0, 250),
-        preco:          produto.preco,
-        unidade:        (produto.unidade || 'un').substring(0, 30),
-        disponivel:     true,
-        fonte_ingestao: fonte,
-    };
-    const { error } = await supabase.from('catalogo_historico').insert(payload);
-    if (error) {
-        logger.error({ error }, '[Ledger] Erro no INSERT de catálogo');
+    // ── UPSERT no catálogo ativo (snapshot sempre atualizado) ──
+    const { data: upserted, error: upsertError } = await supabase
+        .from('catalogo_ativo')
+        .upsert(
+            {
+                loja_id:        lojaId,
+                produto_nome:   nomeSeguro,
+                preco:          produto.preco,
+                unidade:        unidadeSegura,
+                disponivel:     true,
+                fonte_ingestao: fonte,
+            },
+            { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
+        )
+        .select('id')
+        .single();
+
+    if (upsertError || !upserted) {
+        logger.error({ error: upsertError }, '[Ledger] Erro no UPSERT de catalogo_ativo');
         throw new Error('Falha ao gravar produto no banco.');
     }
+
+    // ── Trilha de auditoria no histórico (append-only) ──
+    await supabase.from('catalogo_historico').insert({
+        loja_id:        lojaId,
+        produto_id:     upserted.id,
+        produto_nome:   nomeSeguro,
+        preco:          produto.preco,
+        unidade:        unidadeSegura,
+        disponivel:     true,
+        fonte_ingestao: fonte,
+    });
+
     return { inserido: true };
 }
 
 /**
- * Sprint 3 #2: LEDGER CORRETO — atualização de preço via INSERT de nova linha.
- * Nunca usa UPDATE para não destruir o histórico.
+ * Atualiza preço no snapshot (catalogo_ativo via UPSERT) e
+ * registra o evento de mudança no ledger histórico (append-only).
  */
 async function atualizarPrecoLedger(lojaId: string, produtoNome: string, novoPreco: number, unidade: string): Promise<void> {
-    const { error } = await supabase.from('catalogo_historico').insert({
+    const nomeSeguro    = produtoNome.substring(0, 250);
+    const unidadeSegura = (unidade || 'un').substring(0, 30);
+
+    // ── Atualiza snapshot ──
+    const { data: upserted, error: upsertError } = await supabase
+        .from('catalogo_ativo')
+        .upsert(
+            {
+                loja_id:        lojaId,
+                produto_nome:   nomeSeguro,
+                preco:          novoPreco,
+                unidade:        unidadeSegura,
+                disponivel:     true,
+                fonte_ingestao: 'manual',
+            },
+            { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
+        )
+        .select('id')
+        .single();
+
+    if (upsertError) {
+        logger.error({ error: upsertError }, '[Ledger] Erro ao atualizar preço em catalogo_ativo');
+        throw new Error('Falha ao atualizar preço.');
+    }
+
+    // ── Registra evento no histórico ──
+    await supabase.from('catalogo_historico').insert({
         loja_id:        lojaId,
-        produto_nome:   produtoNome.substring(0, 250),
+        produto_id:     upserted?.id,
+        produto_nome:   nomeSeguro,
         preco:          novoPreco,
-        unidade:        (unidade || 'un').substring(0, 30),
+        unidade:        unidadeSegura,
         disponivel:     true,
         fonte_ingestao: 'manual',
     });
-    if (error) {
-        logger.error({ error }, '[Ledger] Erro ao atualizar preço');
-        throw new Error('Falha ao atualizar preço.');
-    }
 }
 
 /**
- * Sprint 4 #1/2/3/4: Soft Delete via INSERT com disponivel: false.
- * Copia o último preço conhecido (constraint NOT NULL).
- * Verifica redundância antes de inserir.
+ * Soft Delete: marca produto como indisponível no snapshot (catalogo_ativo)
+ * e registra o evento de remoção na trilha de auditoria (catalogo_historico).
+ * Proteção contra redundância: ignora se já está fora de estoque.
  */
 async function retirarEstoqueLedger(lojaId: string, produtoNome: string, unidadeConhecida: string): Promise<void> {
-    // Busca o registro mais recente para verificar status e copiar preço
-    const { data: ultimo } = await supabase
-        .from('catalogo_historico')
-        .select('preco, unidade, disponivel')
+    // ── Busca snapshot atual para verificar estado e copiar preço ──
+    const { data: ativo } = await supabase
+        .from('catalogo_ativo')
+        .select('id, preco, unidade, disponivel')
         .eq('loja_id', lojaId)
         .ilike('produto_nome', `%${produtoNome}%`)
-        .order('registrado_em', { ascending: false })
         .limit(1)
-        .single();
+        .maybeSingle();
 
-    // Sprint 4 #4: proteção contra redundância
-    if (ultimo && ultimo.disponivel === false) {
+    // Proteção contra redundância
+    if (ativo && ativo.disponivel === false) {
         logger.info({ lojaId, produtoNome }, '[Ledger] Produto já fora de estoque — sem ação');
         return;
     }
 
-    const { error } = await supabase.from('catalogo_historico').insert({
+    const precoConhecido    = ativo?.preco ?? 0;
+    const unidadeConhecidaFinal = (ativo?.unidade || unidadeConhecida || 'un').substring(0, 30);
+    const nomeSeguro        = produtoNome.substring(0, 250);
+
+    // ── Soft Delete no snapshot ──
+    if (ativo?.id) {
+        const { error: updateError } = await supabase
+            .from('catalogo_ativo')
+            .update({ disponivel: false })
+            .eq('id', ativo.id);
+
+        if (updateError) {
+            logger.error({ error: updateError }, '[Ledger] Erro no Soft Delete em catalogo_ativo');
+            throw new Error('Falha ao retirar produto do estoque.');
+        }
+    }
+
+    // ── Registra evento de remoção no histórico ──
+    await supabase.from('catalogo_historico').insert({
         loja_id:        lojaId,
-        produto_nome:   produtoNome.substring(0, 250),
-        preco:          ultimo?.preco ?? 0,   // Sprint 4 #3: cópia obrigatória do preço (NOT NULL)
-        unidade:        (ultimo?.unidade || unidadeConhecida || 'un').substring(0, 30),
+        produto_id:     ativo?.id,
+        produto_nome:   nomeSeguro,
+        preco:          precoConhecido,
+        unidade:        unidadeConhecidaFinal,
         disponivel:     false,
         fonte_ingestao: 'manual',
     });
-    if (error) {
-        logger.error({ error }, '[Ledger] Erro no Soft Delete');
-        throw new Error('Falha ao retirar produto do estoque.');
-    }
 }
 
 async function obterEstatisticas(lojaId: string) {

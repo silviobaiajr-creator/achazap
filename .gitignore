@@ -2,3 +2,10 @@ node_modules/
 dist/
 .env
 *.log
+
+# IA & Brain
+.agent/
+artifacts/
+scratch/
+brain/
+.system_generated/

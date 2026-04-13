@@ -9,15 +9,28 @@ import { boss } from '../queue/pgBossClient.js';
  */
 export async function startMessageWorker() {
     await boss.work('messages', {
-        teamSize: 5,        // Equivalente ao concurrency: 5
+        teamSize: 5,
         teamConcurrency: 5,
-    } as any, async (jobs: any) => { // boss.work em lote ou unico
-        const job = Array.isArray(jobs) ? jobs[0] : (jobs as any);
-        const message = job.data;
-        const msgId = job.id;
-        
-        logger.info({ jobId: msgId, from: message.from, type: message.type }, '[Processor] Iniciando job (pg-boss)');
-        await processMessage(message);
+        newJobCheckInterval: 500, // QA Fix: Busca novos jobs a cada 500ms
+    } as any, async (args: any) => { 
+        try {
+            // Dependendo da versão do pg-boss, o args pode vir como array (por retrocompatibilidade)
+            const job = Array.isArray(args) ? args[0] : args;
+            if (!job || !job.data) {
+                logger.warn({ args }, '[Processor] Job vazio / mal formatado bloqueado');
+                return;
+            }
+
+            const message = job.data;
+            const msgId = job.id;
+            
+            logger.info({ jobId: msgId, from: message.from, type: message.type }, '[Processor] Iniciando job (pg-boss)');
+            await processMessage(message);
+        } catch (err: any) {
+            // Isolamento total da Stack: previne "Cannot read properties" ocultos fora do try
+            logger.error({ err, msg: err.message }, '[Processor] Falha na execução da mensagem. Agendando retry.');
+            throw err;
+        }
     });
-    logger.info('[Processor] Worker ativo com pg-boss');
+    logger.info('[Processor] Worker ativo com pg-boss (concorrência ajustada, batch desligado)');
 }

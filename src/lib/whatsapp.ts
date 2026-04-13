@@ -233,8 +233,15 @@ export type WhatsAppMessage = {
     timestamp: string;
 };
 
+// Tipos de mensagens que o bot aceita processar. Qualquer coisa fora disso é descartada.
+const TIPOS_ACEITOS = new Set<string>([
+    'text', 'image', 'audio', 'video', 'document', 'interactive', 'sticker',
+    'location', 'contacts', 'reaction',
+]);
+
 /**
  * Extrai a mensagem relevante do payload bruto do webhook da Meta.
+ * Implementa allow-list de tipos e filtra echos/eventos de sistema.
  */
 export function extractMessage(body: unknown): WhatsAppMessage | null {
     try {
@@ -242,10 +249,31 @@ export function extractMessage(body: unknown): WhatsAppMessage | null {
         const entry = (raw.entry as unknown[])?.[0] as Record<string, unknown>;
         const changes = (entry?.changes as unknown[])?.[0] as Record<string, unknown>;
         const value = changes?.value as Record<string, unknown>;
+
+        // ── Filtro 1: Descartar eventos que NÃO têm mensagens (status, read receipts, etc)
         const messages = value?.messages as unknown[];
         if (!messages || messages.length === 0) return null;
 
         const msg = messages[0] as Record<string, unknown>;
+
+        // ── Filtro 2: Descartar tipos fora da allow-list (system, order, etc)
+        const tipo = msg.type as string;
+        if (!TIPOS_ACEITOS.has(tipo)) {
+            console.info(`[Webhook] Mensagem ignorada (Tipo: ${tipo}, Motivo: allow-list)`);
+            return null;
+        }
+
+        // ── Filtro 3: Descartar echos (mensagem enviada pelo próprio bot)
+        // A Meta marca echos com context.from === phone_number_id
+        const context = msg.context as Record<string, unknown> | undefined;
+        if (context?.from === process.env.WHATSAPP_PHONE_NUMBER_ID || tipo === 'system') {
+            console.info(`[Webhook] Echo/Sistema ignorado de ${msg.from}`);
+            return null;
+        }
+
+        // ── Filtro 4: Rejeitar mensagens sem remetente válido
+        if (!msg.from || typeof msg.from !== 'string') return null;
+
         return {
             from: msg.from as string,
             type: msg.type as WhatsAppMessage['type'],
