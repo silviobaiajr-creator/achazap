@@ -19,6 +19,9 @@ services:
         sync: false
       - key: WHATSAPP_APP_SECRET
         sync: false
+      - key: TEST_BYPASS_TOKEN
+        sync: false
+        generateValue: true # Gera uma senha aleatória automaticamente se não houver
       - key: GEMINI_API_KEY
         sync: false
       - key: SUPABASE_URL

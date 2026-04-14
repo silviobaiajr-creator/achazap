@@ -10,6 +10,7 @@ import { logger } from './lib/logger.js';
 
 const VERIFY_TOKEN  = process.env.WHATSAPP_VERIFY_TOKEN!;
 const APP_SECRET    = process.env.WHATSAPP_APP_SECRET;
+const TEST_BYPASS_TOKEN = process.env.TEST_BYPASS_TOKEN; // Permite testes externos (ex: TestSprite)
 
 // 🛡️ REMEDIAÇÃO A10 (Fail-Closed): O servidor JAMAIS deve subir sem os tokens de assinatura.
 if (!VERIFY_TOKEN || !APP_SECRET) {
@@ -69,25 +70,36 @@ export function buildServer() {
         const body = request.body as any;
 
         // ── CAMADA 1: Validação HMAC sobre raw body ──
-        // APP_SECRET foi forçado na inicialização, se chegou aqui, ele existe.
         const rawBody = Buffer.isBuffer(body.__rawBody)
             ? body.__rawBody
             : Buffer.from(JSON.stringify(body));
 
         const signature = (request.headers['x-hub-signature-256'] as string) ?? '';
-        const expected  = 'sha256=' + createHmac('sha256', APP_SECRET!)
-            .update(rawBody)
-            .digest('hex');
+        const bypassHeader = request.headers['x-test-bypass'] as string;
 
-        try {
-            const sigBuf = Buffer.from(signature);
-            const expBuf = Buffer.from(expected);
-            if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
-                app.log.warn('[Webhook] Assinatura HMAC inválida — interceptação bloqueada');
+        // Bypass de segurança para testes (Sprint 15)
+        // Só funciona se TEST_BYPASS_TOKEN estiver definido e tiver pelo menos 8 caracteres
+        const canBypass = TEST_BYPASS_TOKEN && 
+                         TEST_BYPASS_TOKEN.length >= 8 && 
+                         bypassHeader === TEST_BYPASS_TOKEN;
+
+        if (!canBypass) {
+            const expected = 'sha256=' + createHmac('sha256', APP_SECRET!)
+                .update(rawBody)
+                .digest('hex');
+
+            try {
+                const sigBuf = Buffer.from(signature);
+                const expBuf = Buffer.from(expected);
+                if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
+                    app.log.warn('[Webhook] Assinatura HMAC inválida — interceptação bloqueada');
+                    return reply.status(401).send({ error: 'Assinatura inválida' });
+                }
+            } catch {
                 return reply.status(401).send({ error: 'Assinatura inválida' });
             }
-        } catch {
-            return reply.status(401).send({ error: 'Assinatura inválida' });
+        } else {
+            app.log.info('[Webhook] Bypass de segurança ativado para teste 🛡️');
         }
 
         // ── CAMADA 2: Morte Síncrona — responde 200 para Meta imediatamente ──
