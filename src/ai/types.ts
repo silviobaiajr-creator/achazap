@@ -29,6 +29,25 @@ export interface DadosOferta {
     produto_filtro?: string;
 }
 
+export interface AlteracaoPlanejada {
+    nome: string;
+    precoFoto: number;
+    unidade: string;
+    acao: 'novo_cadastro' | 'preco_atualizado' | 'sem_alteracao' | 'ambiguo';
+    produtoExistente?: {
+        id: string;
+        produto_nome: string;
+        preco: number;
+        unidade: string;
+    };
+    similares?: Array<{
+        id: string;
+        produto_nome: string;
+        preco: number;
+        unidade: string;
+    }>;
+}
+
 export interface ContextoSessao {
     estado: EstadosFluxo;
     dadosProduto?: Partial<DadosProduto>;
@@ -45,4 +64,5 @@ export interface ContextoSessao {
     retries?: number;
     similaresEncontrados?: any[];
     itensPendenteConfirmacao?: any[];
+    alteracoesPlanejadas?: AlteracaoPlanejada[];
 }

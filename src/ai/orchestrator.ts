@@ -18,7 +18,7 @@ import {
     cache,
 } from '../lib/redis-cloud.js';
 import { supabaseAdmin as supabase } from '../lib/supabase.js';
-import { EstadosFluxo, ContextoSessao, DadosProduto, DadosOferta } from './types.js';
+import { EstadosFluxo, ContextoSessao, DadosProduto, DadosOferta, AlteracaoPlanejada } from './types.js';
 import { detectarEstadoPorWhatsApp } from '../lib/location.js';
 import { logger, logTokens } from '../lib/logger.js';
 import {
@@ -38,16 +38,7 @@ const delay        = (ms: number) => new Promise(res => setTimeout(res, ms));
 
 // interfaces agora centralizadas no types.ts
 
-type TipoAlteracao = 'novo_cadastro' | 'preco_atualizado' | 'sem_alteracao' | 'ambiguo';
-
-interface AlteracaoPlanejada {
-    nome: string;
-    precoFoto: number;
-    unidade: string;
-    acao: TipoAlteracao;
-    produtoExistente?: { id: string; produto_nome: string; preco: number; unidade: string };
-    similares?: Array<{ id: string; produto_nome: string; preco: number; unidade: string }>;
-}
+// interfaces agora centralizadas no types.ts
 
 // ============================================================
 // MENU PRINCIPAL
@@ -930,7 +921,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         
         if (confirmou) {
             // Validação: verificando se há itens ambíguos não resolvidos
-            const ambiguos = alteracoes.filter(a => a.acao === 'ambiguo');
+            const ambiguos = alteracoes.filter((a: AlteracaoPlanejada) => a.acao === 'ambiguo');
             if (ambiguos.length > 0) {
                 await sendTextMessage(from, `⚠️ Atenção! Você tem *${ambiguos.length}* produto(s) ambiguo(s) na lista. Use o botão *✏️ Editar um Item* para escolher qual produto do estoque corresponde à foto.`);
                 return;
@@ -1020,7 +1011,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         if (isNaN(numeroDigitado) || numeroDigitado < 1 || numeroDigitado > lista.length) {
             // Sprint 14: NLP Fallback para o Menu Cego na edição
             if (userMessageText.trim()) {
-                const listaNomes = lista.map((a, i) => `${i + 1} - ${a.nome}`).join('\n');
+                const listaNomes = lista.map((a: AlteracaoPlanejada, i: number) => `${i + 1} - ${a.nome}`).join('\n');
                 try {
                     const result = await ai.models.generateContent({
                         model: GEMINI_MODEL,
@@ -1115,7 +1106,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             if (isNaN(opcaoNum) || opcaoNum < 0 || opcaoNum > (item.similares?.length ?? 0)) {
                 // Sprint 14: NLP Fallback para Desempate na edição
                 if (userMessageText.trim()) {
-                    const listaSimilares = item.similares!.map((s, i) => `${i + 1} - ${s.produto_nome}`).concat(['0 - Nenhum (Novo)']).join('\n');
+                    const listaSimilares = item.similares!.map((s: any, i: number) => `${i + 1} - ${s.produto_nome}`).concat(['0 - Nenhum (Novo)']).join('\n');
                     try {
                         const result = await ai.models.generateContent({
                             model: GEMINI_MODEL,
