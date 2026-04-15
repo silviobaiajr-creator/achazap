@@ -9,6 +9,11 @@ export enum EstadosFluxo {
     AGUARDANDO_CONFIRMACAO_ALTERACOES = 'AGUARDANDO_CONFIRMACAO_ALTERACOES',
     AGUARDANDO_SELECAO_EDICAO = 'AGUARDANDO_SELECAO_EDICAO',
     AGUARDANDO_NOVO_PRECO_EDICAO = 'AGUARDANDO_NOVO_PRECO_EDICAO',
+    
+    // Estados de Onboarding (Sprint Auditoria)
+    ONBOARDING_PERFIL = 'ONBOARDING_PERFIL',
+    ONBOARDING_NOME = 'ONBOARDING_NOME',
+    ONBOARDING_LOCALIZACAO = 'ONBOARDING_LOCALIZACAO',
 }
 
 export interface DadosProduto {
@@ -25,8 +30,19 @@ export interface DadosOferta {
 }
 
 export interface ContextoSessao {
-    estadoAtual: EstadosFluxo;
-    dadosParciais: Partial<DadosProduto> | Partial<DadosOferta>;
-    opcaoSelecionada?: number;
+    estado: EstadosFluxo;
+    dadosProduto?: Partial<DadosProduto>;
+    dadosOferta?: Partial<DadosOferta>;
+    dadosLojista?: {
+        nome?: string;
+        cidade?: string;
+        bairro?: string;
+        estado?: string;
+    };
+    acao?: string;
+    perguntaPendente?: string;
     termoBusca?: string;
+    retries?: number;
+    similaresEncontrados?: any[];
+    itensPendenteConfirmacao?: any[];
 }

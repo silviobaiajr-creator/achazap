@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type, Part } from '@google/genai';
+import { z } from 'zod';
 import {
     sendTextMessage,
     downloadMedia,
@@ -17,7 +18,8 @@ import {
     cache,
 } from '../lib/redis-cloud.js';
 import { supabaseAdmin as supabase } from '../lib/supabase.js';
-import { EstadosFluxo } from './types.js';
+import { EstadosFluxo, ContextoSessao, DadosProduto, DadosOferta } from './types.js';
+import { detectarEstadoPorWhatsApp } from '../lib/location.js';
 import { logger, logTokens } from '../lib/logger.js';
 import {
     ProdutoExtraidoSchema,
@@ -34,34 +36,7 @@ import { ai, GEMINI_MODEL } from '../lib/gemini.js';
 
 const delay        = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-// ============================================================
-// TIPOS
-// ============================================================
-interface DadosProduto {
-    nome: string;
-    preco: number;
-    unidade: string;
-}
-
-interface DadosOferta {
-    valor_minimo: number;
-    percentual: number;
-    validade: string;
-    produto_filtro?: string;
-}
-
-interface ContextoSessao {
-    estado: EstadosFluxo;
-    dadosProduto?: Partial<DadosProduto>;
-    dadosOferta?: Partial<DadosOferta>;
-    acao?: string;
-    perguntaPendente?: string;
-    termoBusca?: string;
-    similaresEncontrados?: Array<{ id: string; produto_nome: string; preco: number; unidade: string }>;
-    retries?: number;  // Sprint 10: contador anti-loop
-    itensPendenteConfirmacao?: Array<DadosProduto>; // produtos extraídos de foto/áudio aguardando OK do lojista
-    alteracoesPlanejadas?: Array<AlteracaoPlanejada>; // resumo comparativo antes de confirmar
-}
+// interfaces agora centralizadas no types.ts
 
 type TipoAlteracao = 'novo_cadastro' | 'preco_atualizado' | 'sem_alteracao' | 'ambiguo';
 
@@ -201,6 +176,23 @@ async function detectarFugaNLP(texto: string): Promise<boolean> {
         logTokens('detectar_fuga_nlp', 'system', 'system', result.usageMetadata);
         const dados = parseSafe(FugaNLPSchema, result.text || '{}', { intencao_fuga: false });
         return dados.intencao_fuga === true;
+    } catch {
+        return false;
+    }
+}
+
+async function detectarIntencaoProativa(texto: string): Promise<boolean> {
+    try {
+        const result = await ai.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: `Analise se o usuário está tentando cadastrar um produto (mencionando nome e preço) ou apenas conversando/dando oi. 
+            Exemplos de cadastro: "Cerveja 5,00", "Lança aí: Leite 4.50", "Acrescenta pão 0,50".
+            Retorne APENAS o JSON: {"intencao_cadastro": boolean}\n\nFrase: "${texto}"\n\nJSON:`,
+            config: { responseMimeType: 'application/json' },
+        });
+        logTokens('detectar_intencao_proativa', 'system', 'system', result.usageMetadata);
+        const dados = parseSafe(z.object({ intencao_cadastro: z.boolean() }), result.text || '{}', { intencao_cadastro: false });
+        return dados.intencao_cadastro === true;
     } catch {
         return false;
     }
@@ -555,6 +547,13 @@ JSON:`;
 async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: ContextoSessao, produto: DadosProduto) {
     const similares = await buscarProdutosSimilares(loja.id, produto.nome);
 
+    // Sprint Auditoria: Se estamos vindo do IDLE, SEMPRE usamos o Card de Confirmação (lote de 1)
+    // para evitar gravações acidentais sem o lojista dar o OK final.
+    if (contexto.estado === EstadosFluxo.IDLE) {
+        await processarLoteProdutos(from, loja, [produto], contexto);
+        return;
+    }
+
     if (similares.length > 0) {
         let listaMsg = '🔍 *Encontrei produtos parecidos no estoque*\nResponda com o número correspondente:\n\n';
         for (let i = 0; i < similares.length; i++) {
@@ -594,13 +593,114 @@ async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: 
 export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     const from = msg.from;
 
-    const loja = await buscarPerfilLoja(from);
-    if (!loja) {
-        logger.debug({ from }, '[processMessage] Número não cadastrado como lojista');
-        return;
-    }
-
+    try {
+        let loja = await buscarPerfilLoja(from);
     let contexto = await lerContexto(from) as ContextoSessao | null;
+
+    // ══════════════════════════════════════════════════════════
+    // DISPATCHER DE PERSONA (Onboarding) - Sprint Auditoria
+    // ══════════════════════════════════════════════════════════
+    if (!loja) {
+        const isInteractive = msg.type === 'interactive';
+        const buttonId = isInteractive
+            ? (msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || '')
+            : '';
+        const userText = msg.text?.body?.trim() || '';
+
+        // Se não há contexto, inicia boas vindas
+        if (!contexto || (contexto.estado !== EstadosFluxo.ONBOARDING_PERFIL && 
+                         contexto.estado !== EstadosFluxo.ONBOARDING_NOME && 
+                         contexto.estado !== EstadosFluxo.ONBOARDING_LOCALIZACAO)) {
+            
+            logger.info({ from }, '[Onboarding] Novo número detectado. Iniciando dispatcher.');
+            await salvarContexto(from, { estado: EstadosFluxo.ONBOARDING_PERFIL });
+            await sendInteractiveButtons(from, 
+                'Olá! 👋 Bem-vindo ao AchaZap.\n\nIdentifiquei que este é seu primeiro contato. Como posso te ajudar hoje?',
+                [
+                    { id: 'perf_lojista', title: 'Sou Lojista' },
+                    { id: 'perf_consumidor', title: 'Quero Comprar' }
+                ]
+            );
+            return;
+        }
+
+        // Fluxo: Escolha de Perfil
+        if (contexto.estado === EstadosFluxo.ONBOARDING_PERFIL) {
+            if (buttonId === 'perf_lojista') {
+                await salvarContexto(from, { ...contexto, estado: EstadosFluxo.ONBOARDING_NOME });
+                await sendTextMessage(from, 'Excelente! 🚀 Vamos cadastrar sua loja.\n\nQual o *Nome da sua Loja*?');
+                return;
+            }
+            if (buttonId === 'perf_consumidor') {
+                await sendTextMessage(from, '👋 A Vitrine AchaZap está chegando em breve na sua região! Por enquanto, este canal é dedicado para lojistas organizarem seus estoques.\n\nFique ligado nas novidades!');
+                await limparContexto(from);
+                return;
+            }
+            // Repetir se não escolher opção válida
+            await sendInteractiveButtons(from, 'Por favor, selecione uma das opções abaixo:', [
+                { id: 'perf_lojista', title: 'Sou Lojista' },
+                { id: 'perf_consumidor', title: 'Quero Comprar' }
+            ]);
+            return;
+        }
+
+        // Fluxo: Nome da Loja
+        if (contexto.estado === EstadosFluxo.ONBOARDING_NOME) {
+            if (!userText || userText.length < 3) {
+                await sendTextMessage(from, 'Por favor, digite um nome válido para sua loja (mínimo 3 letras).');
+                return;
+            }
+            await salvarContexto(from, { 
+                ...contexto, 
+                estado: EstadosFluxo.ONBOARDING_LOCALIZACAO,
+                dadosLojista: { nome: userText }
+            });
+            await sendTextMessage(from, `Legal, *${userText}*!\n\nAgora, qual a sua *Cidade e Bairro*?\nEx: Portel, Castanheira`);
+            return;
+        }
+
+        // Fluxo: Localização (Cidade e Bairro)
+        if (contexto.estado === EstadosFluxo.ONBOARDING_LOCALIZACAO) {
+            const extraidos = userText.split(',').map(s => s.trim());
+            if (extraidos.length < 2) {
+                await sendTextMessage(from, 'Para melhor busca, envie sua Cidade e Bairro separados por vírgula.\nEx: Portel, Castanheira');
+                return;
+            }
+
+            const [cidade, bairro] = extraidos;
+            const estado = detectarEstadoPorWhatsApp(from) || 'PA'; // Fallback PA conforme req anterior
+
+            try {
+                const { data: novaLoja, error } = await supabase
+                    .from('lojas')
+                    .insert({
+                        whatsapp: from.startsWith('+') ? from : '+' + from,
+                        nome: contexto.dadosLojista?.nome,
+                        cidade: cidade,
+                        bairro: bairro,
+                        estado: estado,
+                        ativa: true,
+                        saldo_cliques: 100 // Crédito inicial de boas-vindas
+                    })
+                    .select()
+                    .single();
+
+                if (error) throw error;
+
+                await sendTextMessage(from, `🎉 Tudo pronto, *${contexto.dadosLojista?.nome}*!\n\nSua loja foi cadastrada em *${cidade}/${bairro}*.\nVocê ganhou 100 cliques de bônus para começar!`);
+                await delay(500);
+                await limparContexto(from);
+                
+                // Recarrega a loja para o fluxo seguir normalmente
+                loja = novaLoja;
+                // Deixa o código seguir para o envio do Menu Principal abaixo
+            } catch (err) {
+                logger.error({ err }, '[Onboarding] Erro ao salvar loja');
+                await sendTextMessage(from, 'Vish, tive um probleminha técnico ao salvar sua loja. Pode tentar digitar a Cidade e Bairro novamente?');
+                return;
+            }
+        }
+    }
 
     const isMediaOnly   = ['image', 'audio', 'video', 'sticker', 'voice'].includes(msg.type);
     const isInteractive = msg.type === 'interactive';
@@ -715,43 +815,55 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     }
 
     // ══════════════════════════════════════════════════════════
-    // CENÁRIO 1/8/12: Estado IDLE
+    // CENÁRIO 1/8/12: Estado IDLE (Inicia Ingestão Proativa)
     // ══════════════════════════════════════════════════════════
     if (!contexto || contexto.estado === EstadosFluxo.IDLE) {
-        // Sprint 1 #7/8: tipos de mídia ou localização em IDLE → bloquear sem baixar (document já interceptado acima)
-        if (isMediaOnly || msg.type === 'location' || msg.type === 'contacts') {
-            const lockAdquirido = await adquirirLock(`menu_lock:${from}`, 8);
-            if (!lockAdquirido) {
-                logger.info({ from }, '[Cenário 8] Rajada bloqueada (lock anti-spam)');
+        
+        // 🎙️ Ingestão Proativa: Mídia (Foto/Áudio) em IDLE
+        if (isMediaOnly) {
+            logger.info({ from }, '[Proativo] Mídia detectada em IDLE. Iniciando extração...');
+            await processarMidia(msg, from, loja, { estado: EstadosFluxo.IDLE });
+            return;
+        }
+
+        // ✍️ Ingestão Proativa: Texto em IDLE
+        if (isTextOnly && userMessageText.trim()) {
+            // Se for apenas uma palavra curta (ex: "Oi", "Tudo bem"), não desperdiça Gemini, manda menu
+            if (userMessageText.trim().length < 4) {
+                await enviarMenu(loja.nome, from);
                 return;
             }
-            const resposta = msg.type === 'image' ? '📸 Bela foto! Mas para continuarmos, escolha uma opção:' :
-                             msg.type === 'audio'  ? '🎵 Recebi seu áudio! Para continuarmos, escolha uma opção:' :
-                             msg.type === 'sticker'? '😄 Figurinha recebida! Para continuarmos, escolha uma opção:' :
-                             '📎 Arquivo recebido! Para continuarmos, escolha uma opção:';
-            await sendTextMessage(from, resposta);
-            await delay(300);
+
+            const ehCadastro = await detectarIntencaoProativa(userMessageText);
+            if (ehCadastro) {
+                logger.info({ from, text: userMessageText }, '[Proativo] Texto de cadastro detectado em IDLE.');
+                // Forçamos o processamento como se estivesse no estado de cadastro
+                await processarDadosProduto(from, loja, userMessageText, { estado: EstadosFluxo.IDLE });
+                return;
+            }
+
+            // Fallback: Se não for cadastro, envia o Menu Principal
             await enviarMenu(loja.nome, from);
-            await liberarLock(`menu_lock:${from}`);
             return;
         }
 
-        // Sprint 12 #2/4: clique interativo de ação em IDLE = fantasma
+        // Bloqueio de outros tipos (location, contacts) persiste sem processamento proativo
+        if (msg.type === 'location' || msg.type === 'contacts') {
+            await sendTextMessage(from, '📍 No momento, não consigo processar esse tipo de anexo. Escolha uma opção do menu:');
+            await delay(300);
+            await enviarMenu(loja.nome, from);
+            return;
+        }
+
+        // Clique interativo expirado
         if (isInteractive && !buttonId.startsWith('menu_')) {
-            await sendTextMessage(from, '⏳ Parece que essa operação expirou ou já foi concluída. Vamos recomeçar!');
+            await sendTextMessage(from, '⏳ Essa operação expirou. Vamos recomeçar!');
             await delay(300);
             await enviarMenu(loja.nome, from);
             return;
         }
 
-        // Texto em IDLE: só envia menu se houver conteúdo real (ignora eventos de sistema vazios)
-        if (isTextOnly && userMessageText.trim()) {
-            await enviarMenu(loja.nome, from);
-            return;
-        }
-
-        // Qualquer outra coisa (tipo desconhecido, evento vazio, etc.) → silêncio total
-        logger.info({ from, tipo: msg.type }, '[IDLE] Evento ignorado (sem conteúdo válido)');
+        logger.info({ from, tipo: msg.type }, '[IDLE] Evento ignorado');
         return;
     }
 
@@ -1383,10 +1495,22 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         return;
     }
 
-    // Fallback: estado desconhecido → enviar menu e limpar
-    logger.warn({ from, estado: contexto?.estado }, '[processMessage] Estado desconhecido, reiniciando para IDLE');
+    // Fallback Final: se nada capturou, envia menu para evitar silêncio (Zero-Silence)
+    logger.warn({ from, estado: contexto?.estado }, '[processMessage] Fallback Zero-Silence acionado');
     await limparContexto(from);
-    await enviarMenu(loja.nome, from);
+    if (loja) await enviarMenu(loja.nome, from);
+    else await sendTextMessage(from, 'Olá! Digite qualquer coisa para começar.');
+
+    } catch (err: any) {
+        logger.error({ err, from }, '🛡️ [Garantia de Resposta] Erro crítico no orquestrador');
+        
+        // Anti-vácuo: Resposta amigável em caso de erro sistêmico
+        try {
+            await sendTextMessage(from, '🚨 *Ops! Tivemos um soluço técnico.*\n\nJá estamos resolvendo! Por favor, tente novamente em um minuto ou digite "Menu".');
+        } catch (sendErr) {
+            logger.error({ sendErr }, 'Falha ao enviar erro de fallback');
+        }
+    }
 }
 
 // ============================================================
