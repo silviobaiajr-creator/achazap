@@ -1008,14 +1008,22 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             numeroDigitado = mapaPalavras[textoNum]!;
         }
         
-        if (isNaN(numeroDigitado) || numeroDigitado < 1 || numeroDigitado > lista.length) {
-            // Sprint 14: NLP Fallback para o Menu Cego na edição
+        const numeroInvalido = !isNaN(numeroDigitado) && (numeroDigitado < 1 || numeroDigitado > lista.length);
+
+        if (isNaN(numeroDigitado) || numeroInvalido) {
+            // Se for um número digitado explicitamente fora da faixa, nem chama IA
+            if (numeroInvalido) {
+                await sendTextMessage(from, `⚠️ A opção *${numeroDigitado}* não existe na lista. Por favor, escolha um número de *1* a *${lista.length}*.`);
+                return;
+            }
+
+            // Sprint 14: NLP Fallback para o Menu Cego na edição (apenas se for texto livre)
             if (userMessageText.trim()) {
                 const listaNomes = lista.map((a: AlteracaoPlanejada, i: number) => `${i + 1} - ${a.nome}`).join('\n');
                 try {
                     const result = await ai.models.generateContent({
                         model: GEMINI_MODEL,
-                        contents: `O usuário quer selecionar um item para EDITAR numa lista de compras/estoque.\nLista:\n${listaNomes}\n\nEle respondeu: "${userMessageText}"\n\nQual o número correspondente ao item que ele quer? Retorne EXATAMENTE o JSON: {"escolha": inteiro, "cancelar": boolean}.\nRegras:\n1. Se ele quer cancelar/parar, retorne "cancelar": true.\n2. Se não for possível identificar, retorne "escolha": -1.`,
+                        contents: `O usuário quer selecionar um item para EDITAR numa lista de compras/estoque.\nLista:\n${listaNomes}\n\nEle respondeu: "${userMessageText}"\n\nQual o número correspondente ao item que ele quer? Retorne EXATAMENTE o JSON: {"escolha": inteiro, "cancelar": boolean}.\nRegras:\n1. Se ele mencionar um número que NÃO está na lista, retorne "escolha": -1.\n2. Se ele quer cancelar/parar, retorne "cancelar": true.\n3. Se não for possível identificar, retorne "escolha": -1.`,
                         config: { responseMimeType: 'application/json' },
                     });
                     logTokens('nlp_selecao_edicao', from, loja?.id ?? 'unknown', result.usageMetadata);
@@ -1103,14 +1111,22 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 opcaoNum = mapaPalavras[textoLimpo]!;
             }
             
-            if (isNaN(opcaoNum) || opcaoNum < 0 || opcaoNum > (item.similares?.length ?? 0)) {
+            const numInvalidoDesempate = !isNaN(opcaoNum) && (opcaoNum < 0 || opcaoNum > (item.similares?.length ?? 0));
+
+            if (isNaN(opcaoNum) || numInvalidoDesempate) {
+                // Travada de segurança: se é número e está fora da faixa, nem chama IA
+                if (numInvalidoDesempate) {
+                    await sendTextMessage(from, `⚠️ A opção *${opcaoNum}* não existe. Escolha entre *0* e *${item.similares?.length}*.`);
+                    return;
+                }
+
                 // Sprint 14: NLP Fallback para Desempate na edição
                 if (userMessageText.trim()) {
                     const listaSimilares = item.similares!.map((s: any, i: number) => `${i + 1} - ${s.produto_nome}`).concat(['0 - Nenhum (Novo)']).join('\n');
                     try {
                         const result = await ai.models.generateContent({
                             model: GEMINI_MODEL,
-                            contents: `O usuário quer escolher um produto similar no estoque.\nOpções:\n${listaSimilares}\n\nResposta: "${userMessageText}"\n\nRegras:\n- Se o usuário der a entender que quer "Nenhum" ou criar um "Novo" produto que não está na lista, a escolha é 0.\n- Retorne JSON: {"escolha": inteiro, "cancelar": boolean}.\n- Só retorne cancelar=true se o usuário quiser explicitamente desistir/cancelar/parar o processo todo.`,
+                            contents: `O usuário quer escolher um produto similar no estoque.\nOpções:\n${listaSimilares}\n\nResposta: "${userMessageText}"\n\nRegras:\n- Se o usuário mencionar um número que NÃO está na lista, retorne "escolha": -1.\n- Se o usuário der a entender que quer "Nenhum" ou criar um "Novo" produto, a escolha é 0.\n- Retorne JSON: {"escolha": inteiro, "cancelar": boolean}.\n- Só retorne cancelar=true se o usuário quiser explicitamente desistir/cancelar/parar o processo todo.`,
                             config: { responseMimeType: 'application/json' },
                         });
                         logTokens('nlp_desempate_edicao', from, loja?.id ?? 'unknown', result.usageMetadata);
