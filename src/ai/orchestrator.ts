@@ -385,6 +385,28 @@ JSON:`;
         return valorAntigo ?? null;
     }
 
+    /**
+     * Calcula o nível de frescor do preço baseado na data de atualização (Sprint Validade)
+     */
+    function calcularSeloFrescor(dataIso?: string | null): string {
+        if (!dataIso) return '🚨 Sem data';
+        
+        try {
+            const data = new Date(dataIso);
+            const agora = new Date();
+            const diffMs = agora.getTime() - data.getTime();
+            const diffDias = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+            
+            if (diffDias <= 1) return '🟢 Verificado hoje';
+            if (diffDias <= 3) return `🟢 Verificado há ${diffDias} dias`;
+            if (diffDias <= 7) return `🟡 Atualizado há ${diffDias} dias`;
+            
+            return `🚨 Preço Desatualizado (há ${diffDias} dias)`;
+        } catch {
+            return '🚨 Data inválida';
+        }
+    }
+
     // ============================================================
     // HELPER VISUAL: formata card de produto para resumo de lote
     // ============================================================
@@ -394,8 +416,6 @@ JSON:`;
         const precoFoto = `R$ ${item.precoFoto.toFixed(2).replace('.', ',')} / ${item.unidade}`;
         const rotuloFonte = fonte === 'foto' ? 'Foto' : fonte === 'audio' ? 'Áudio' : 'Digitado';
 
-        // Nome a exibir: para produtos já resolvidos (preco_atualizado/sem_alteracao)
-        // usamos o nome oficial do estoque; para os demais o nome enviado
         const nomeExibido = (item.acao === 'preco_atualizado' || item.acao === 'sem_alteracao') && item.produtoExistente
             ? item.produtoExistente.produto_nome
             : item.nome;
@@ -408,16 +428,20 @@ JSON:`;
             card += `📦 Novo cadastro`;
         } else if (item.acao === 'preco_atualizado' && item.produtoExistente) {
             const precoAntigo = `R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')} / ${item.produtoExistente.unidade}`;
+            const selo = calcularSeloFrescor(item.produtoExistente.updated_at);
             card += `🔄 ${num} *${nomeExibido}*\n`;
             card += `💰 ${rotuloFonte}: *${precoFoto}*\n`;
             card += `📦 Estoque: ${precoAntigo}\n`;
+            card += `⏱️ Status: ${selo}\n`;
             card += `↪️ Atualizar preço`;
         } else if (item.acao === 'sem_alteracao' && item.produtoExistente) {
             const precoEstoque = `R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')} / ${item.produtoExistente.unidade}`;
+            const selo = calcularSeloFrescor(item.produtoExistente.updated_at);
             card += `⏭️ ${num} *${nomeExibido}*\n`;
             card += `💰 ${rotuloFonte}: *${precoFoto}*\n`;
             card += `📦 Estoque: ${precoEstoque}\n`;
-            card += `Sem alteração`;
+            card += `⏱️ Status: ${selo}\n`;
+            card += `Sem alteração (confirmado hoje)`;
         } else if (item.acao === 'ambiguo') {
             const numSimilares = item.similares?.length ?? '?';
             card += `⚠️ ${num} *${item.nome}*\n`;
@@ -425,7 +449,6 @@ JSON:`;
             card += `📦 ${numSimilares} produto(s) parecido(s) no estoque\n`;
             card += `Precisa escolher qual atualizar`;
         } else {
-            // fallback genérico
             card += `📌 ${num} *${item.nome}*\n`;
             card += `💰 ${rotuloFonte}: *${precoFoto}*`;
         }
@@ -816,6 +839,13 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
         // ✍️ Ingestão Proativa: Texto em IDLE
         if (isTextOnly && userMessageText.trim()) {
+            
+            // Comando de Revisão de Preços (Sprint Validade)
+            if (userMessageText.toLowerCase().includes('/revisar')) {
+                await processarRevisaoPrecos(from, loja);
+                return;
+            }
+
             // Se for apenas uma palavra curta (ex: "Oi", "Tudo bem"), não desperdiça Gemini, manda menu
             if (userMessageText.trim().length < 4) {
                 await enviarMenu(loja.nome, from);
@@ -1809,7 +1839,7 @@ async function buscarProdutosSimilares(
     if (candidatos.length === 0) {
         const { data, error } = await supabase
             .from('catalogo_ativo')
-            .select('id, produto_nome, preco, unidade')
+            .select('id, produto_nome, preco, unidade, updated_at')
             .eq('loja_id', lojaId)
             .eq('disponivel', true);
 
@@ -1865,8 +1895,13 @@ async function ingeriCatalogo(lojaId: string, produto: DadosProduto, fonte: stri
 
     const precoMudou = !ativo || Math.abs(Number(ativo.preco) - produto.preco) > 0.001;
 
-    if (!precoMudou) {
-        logger.info({ lojaId, nome: nomeSeguro, preco: produto.preco }, '[Ledger] Sem alteração de preço — snapshot preservado');
+    if (!precoMudou && ativo) {
+        // Sprint Validade: preço igual, mas renovamos o timestamp de confirmação
+        logger.info({ lojaId, nome: nomeSeguro }, '[Ledger] Renovando selo de frescor (preço igual)');
+        await supabase
+            .from('catalogo_ativo')
+            .update({ updated_at: new Date().toISOString() })
+            .eq('id', ativo.id);
         return { inserido: false };
     }
 
@@ -2022,13 +2057,38 @@ async function criarOferta(lojaId: string, dados: any): Promise<void> {
 }
 
 async function buscarOfertasAtivas(lojaId: string) {
-    const hoje = new Date().toISOString().split('T')[0];
-    const { data, error } = await supabase
-        .from('ofertas_desconto')
-        .select('id, valor_minimo, percentual, validade, produto_filtro')
-        .eq('loja_id', lojaId)
-        .gte('validade', hoje)
-        .order('validade', { ascending: true });
-    if (error) throw error;
+    const { data } = await supabase.from('ofertas_desconto').select('*').eq('loja_id', lojaId).gte('validade', new Date().toISOString().split('T')[0]);
     return data || [];
+}
+
+/**
+ * Busca os itens com preços mais antigos para o Lojista revisar (Sprint Validade)
+ */
+async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
+    const { data: antigos, error } = await supabase
+        .from('catalogo_ativo')
+        .select('produto_nome, preco, unidade, updated_at')
+        .eq('loja_id', loja.id)
+        .eq('disponivel', true)
+        .order('updated_at', { ascending: true })
+        .limit(5);
+
+    if (error || !antigos || antigos.length === 0) {
+        await sendTextMessage(from, '✅ Todos os seus preços estão atualizados e com selo verde! Nada para revisar por enquanto.');
+        return;
+    }
+
+    let relatorio = `📋 *Relatório de Vencimento de Preços*\n`;
+    relatorio += `Estes itens estão próximos de perder o selo verde:\n\n`;
+
+    antigos.forEach((item, i) => {
+        const selo = calcularSeloFrescor(item.updated_at);
+        relatorio += `*${i+1}. ${item.produto_nome}*\n💰 R$ ${item.preco.toFixed(2).replace('.', ',')} / ${item.unidade}\n⏱️ ${selo}\n\n`;
+    });
+
+    relatorio += `Para renovar, basta enviar uma nova foto do encarte ou audío com os preços atuais!`;
+
+    await sendTextMessage(from, relatorio);
+    await delay(500);
+    await enviarMenu(loja.nome, from);
 }
