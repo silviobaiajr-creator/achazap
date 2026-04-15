@@ -12,65 +12,60 @@ export async function startValidityWorker() {
         logger.info('[ValidityWorker] Iniciando ronda diária de validade...');
 
         try {
-            // ── 1. Busca lojas com produtos entrando no 6º dia de "vencimento" ──
-            // Intervalo: entre 6 e 7 dias atrás
-            const { data: lojasAvisar, error } = await supabaseAdmin
+            // ── 1. Busca itens que atingiram o 6º dia (janela de 24h) ──
+            const seisDiasAtras = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString();
+            const seteDiasAtras = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+            const { data: itensExpira, error: errItens } = await supabaseAdmin
                 .from('catalogo_ativo')
-                .select(`
-                    loja_id,
-                    produto_nome,
-                    lojas:lojas!inner (
-                        whatsapp,
-                        nome
-                    )
-                `)
+                .select('loja_id, produto_nome')
                 .eq('disponivel', true)
-                .lt('updated_at', new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString())
-                .gte('updated_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString());
+                .lt('updated_at', seisDiasAtras)
+                .gte('updated_at', seteDiasAtras);
 
-            if (error) {
-                logger.error({ error }, '[ValidityWorker] Erro ao buscar itens para aviso');
+            if (errItens) {
+                logger.error({ errItens }, '[ValidityWorker] Erro ao buscar itens');
                 return;
             }
 
-            if (!lojasAvisar || lojasAvisar.length === 0) {
-                logger.info('[ValidityWorker] Nenhum lojista precisa de aviso hoje.');
+            if (!itensExpira || itensExpira.length === 0) {
+                logger.info('[ValidityWorker] Nenhum item precisa de aviso hoje.');
                 return;
             }
 
-            // ── 2. Agrupa por loja para não enviar múltiplas mensagens ──
-            const agrupamento = new Map<string, { whatsapp: string; nomeLoja: string; produtos: string[] }>();
+            // ── 2. Busca os dados das lojas envolvidas ──
+            const lojaIds = [...new Set(itensExpira.map(i => i.loja_id))];
+            const { data: lojasDados, error: errLojas } = await supabaseAdmin
+                .from('lojas')
+                .select('id, whatsapp, nome')
+                .in('id', lojaIds)
+                .eq('ativa', true);
 
-            for (const item of lojasAvisar) {
-                const lojaInfo = item.lojas as any;
-                if (!agrupamento.has(item.loja_id)) {
-                    agrupamento.set(item.loja_id, {
-                        whatsapp: lojaInfo.whatsapp,
-                        nomeLoja: lojaInfo.nome,
-                        produtos: []
-                    });
-                }
-                const lojaData = agrupamento.get(item.loja_id)!;
-                if (lojaData.produtos.length < 3) {
-                    lojaData.produtos.push(item.produto_nome);
-                }
+            if (errLojas || !lojasDados) {
+                logger.error({ errLojas }, '[ValidityWorker] Erro ao buscar dados das lojas');
+                return;
             }
 
-            // ── 3. Dispara as mensagens proativas ──
-            for (const [lojaId, data] of agrupamento.entries()) {
-                const listaProdutos = data.produtos.join(', ');
-                const aviso = `Olá, *${data.nomeLoja}*! ⏳\n\nNossa auditoria notou que os preços de *${listaProdutos}* (e outros) estão quase vencendo o selo verde.\n\nQue tal revisá-los agora para manter a confiança dos seus clientes? É só digitar */revisar* para ver a lista completa!`;
+            // ── 3. Agrupa e Dispara ──
+            const produtosPorLoja = new Map<string, string[]>();
+            itensExpira.forEach(item => {
+                const lista = produtosPorLoja.get(item.loja_id) || [];
+                if (lista.length < 3) lista.push(item.produto_nome);
+                produtosPorLoja.set(item.loja_id, lista);
+            });
 
-                logger.info({ lojaId, whatsapp: data.whatsapp }, '[ValidityWorker] Enviando aviso proativo');
-                
-                try {
-                    await sendTextMessage(data.whatsapp, aviso);
-                } catch (sendErr) {
-                    logger.error({ sendErr, lojaId }, '[ValidityWorker] Falha ao enviar mensagem para loja');
-                }
+            for (const loja of lojasDados) {
+                const exemplos = produtosPorLoja.get(loja.id) || [];
+                if (exemplos.length === 0) continue;
+
+                const listaStr = exemplos.join(', ');
+                const aviso = `Olá, *${loja.nome}*! ⏳\n\nNossa auditoria notou que os preços de *${listaStr}* (e outros) estão quase vencendo o selo verde.\n\nQue tal revisá-los agora para manter a confiança dos seus clientes? É só digitar */revisar* para ver a lista completa!`;
+
+                logger.info({ lojaId: loja.id }, '[ValidityWorker] Disparando aviso');
+                await sendTextMessage(loja.whatsapp, aviso).catch(e => logger.error({ e }, 'Falha envio push'));
             }
 
-            logger.info({ totalLojas: agrupamento.size }, '[ValidityWorker] Ronda finalizada com sucesso.');
+            logger.info({ totalLojas: lojasDados.length }, '[ValidityWorker] Ronda finalizada com sucesso.');
 
         } catch (err) {
             logger.error({ err }, '[ValidityWorker] Erro crítico na execução do job');

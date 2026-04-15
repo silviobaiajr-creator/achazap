@@ -12,8 +12,21 @@ async function main() {
 
     try {
         await startQueue();
-        await startMessageWorker();
-        await startValidityWorker();
+        
+        // Inicializa workers de forma independente para que um não trave o outro
+        try {
+            await startMessageWorker();
+            console.log('✅ Worker de Mensagens (WhatsApp) ativo');
+        } catch (err) {
+            console.error('❌ Falha ao iniciar worker de mensagens:', err);
+        }
+
+        try {
+            await startValidityWorker();
+            console.log('✅ Worker de Validade (Cron 9h) ativo');
+        } catch (err) {
+            console.error('❌ Falha ao iniciar worker de validade:', err);
+        }
         
         await app.listen({ port: PORT, host: '0.0.0.0' });
         const publicUrl = process.env.BASE_URL ?? `http://localhost:${PORT}`;
@@ -21,7 +34,7 @@ async function main() {
         console.log(`📡 Webhook: ${publicUrl}/webhook`);
         console.log(`🔗 Redirect: ${publicUrl}/r`);
     } catch (err) {
-        app.log.error(err);
+        console.error('🔥 Erro fatal no startup:', err);
         process.exit(1);
     }
 
