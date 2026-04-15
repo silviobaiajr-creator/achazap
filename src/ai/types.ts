@@ -9,6 +9,7 @@ export enum EstadosFluxo {
     AGUARDANDO_CONFIRMACAO_ALTERACOES = 'AGUARDANDO_CONFIRMACAO_ALTERACOES',
     AGUARDANDO_SELECAO_EDICAO = 'AGUARDANDO_SELECAO_EDICAO',
     AGUARDANDO_NOVO_PRECO_EDICAO = 'AGUARDANDO_NOVO_PRECO_EDICAO',
+    AGUARDANDO_NOVO_NOME_EDICAO = 'AGUARDANDO_NOVO_NOME_EDICAO',
     
     // Estados de Onboarding (Sprint Auditoria)
     ONBOARDING_PERFIL = 'ONBOARDING_PERFIL',
@@ -33,7 +34,7 @@ export interface AlteracaoPlanejada {
     nome: string;
     precoFoto: number;
     unidade: string;
-    acao: 'novo_cadastro' | 'preco_atualizado' | 'sem_alteracao' | 'ambiguo';
+    acao: 'novo_cadastro' | 'preco_atualizado' | 'sem_alteracao' | 'ambiguo' | 'remover';
     produtoExistente?: {
         id: string;
         produto_nome: string;

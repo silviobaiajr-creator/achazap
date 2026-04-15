@@ -743,13 +743,10 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     // ══════════════════════════════════════════════════════════
     // MIDDLEWARE GLOBAL DE FUGA (Sprint 6) — antes de tudo
     // ══════════════════════════════════════════════════════════
-    // Só aciona se há contexto ativo (não desperdica tokens em IDLE)
-    if (contexto && contexto.estado !== EstadosFluxo.IDLE) {
-        const fugou = await verificarFugaGlobal(msg, buttonId, userMessageText, contexto, from, loja);
-        if (fugou) return;
-        // Reler contexto após fuga (contexto pode ter sido limpo)
-        contexto = await lerContexto(from) as ContextoSessao | null;
-    }
+    const fugou = await verificarFugaGlobal(msg, buttonId, userMessageText, contexto, from, loja);
+    if (fugou) return;
+    // Reler contexto após fuga (contexto pode ter sido limpo)
+    contexto = await lerContexto(from) as ContextoSessao | null;
 
     // ══════════════════════════════════════════════════════════
     // BOTÕES DE NAVEGAÇÃO DO MENU (aceitos mesmo em IDLE)
@@ -939,6 +936,8 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             let duplicatas = 0;
             
             for (const alt of alteracoes) {
+                if (alt.acao === 'remover') continue; // Pula itens excluídos pelo lojista
+
                 if (alt.acao === 'novo_cadastro') {
                     await ingeriCatalogo(loja.id, { nome: alt.nome, preco: alt.precoFoto, unidade: alt.unidade }, 'foto');
                     inseridos++;
@@ -1053,6 +1052,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         
         // Se o item tem múltiplas opções (ambíguo), mostra a lista para desempate
         if (itemEscolhido.acao === 'ambiguo' && itemEscolhido.similares && itemEscolhido.similares.length > 1) {
+            // ... (mantém lógica de desempate existente) ...
             let msgOpcoes = `⚠️ *Encontrei ${itemEscolhido.similares.length} opções no estoque*\nQual delas é a correspondente?\n\n`;
             itemEscolhido.similares.forEach((s: any, idx: number) => {
                 msgOpcoes += `───────────────\n`;
@@ -1073,15 +1073,74 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             return;
         }
         
+        // NOVO FLOW: Menu de Edição de Item em vez de pedir preço direto
         await salvarContexto(from, {
             ...contexto,
-            estado: EstadosFluxo.AGUARDANDO_NOVO_PRECO_EDICAO,
+            estado: EstadosFluxo.AGUARDANDO_NOVO_PRECO_EDICAO, // Reutilizamos esse estado ou um novo? Melhor um novo.
             acao: indiceReal.toString(),
         });
-        
-        await sendTextMessage(from, 
-            `Você escolheu: *${itemEscolhido.nome}*\nPreço na lista: R$ ${itemEscolhido.precoFoto.toFixed(2).replace('.', ',')}\n\n👉 Digite o *NOVO PREÇO* ou digite *0* para excluir este item:`
+
+        await sendInteractiveButtons(from, 
+            `Item: *${itemEscolhido.nome}*\nPreço atual: R$ ${itemEscolhido.precoFoto.toFixed(2).replace('.', ',')}\n\nO que deseja alterar?`,
+            [
+                { id: `edit_nome_${indiceReal}`, title: '✏️ Nome' },
+                { id: `edit_preco_${indiceReal}`, title: '💰 Preço' },
+                { id: `edit_excluir_${indiceReal}`, title: '❌ Excluir' }
+            ]
         );
+        return;
+    }
+    
+    // ═══════════════════════════════════════════════════════════
+    // NOVO ESTADO: Handler de botões de edição de item
+    // ═══════════════════════════════════════════════════════════
+    if (contexto.estado === EstadosFluxo.AGUARDANDO_NOVO_PRECO_EDICAO && isInteractive && buttonId.startsWith('edit_')) {
+        const [,,indiceStr] = buttonId.split('_');
+        const indiceReal = parseInt(indiceStr, 10);
+        const lista = contexto.alteracoesPlanejadas ?? [];
+        const item = lista[indiceReal];
+
+        if (buttonId.startsWith('edit_nome_')) {
+            await salvarContexto(from, { 
+                ...contexto, 
+                estado: EstadosFluxo.AGUARDANDO_NOVO_NOME_EDICAO,
+                acao: indiceReal.toString()
+            });
+            await sendTextMessage(from, `Qual o novo nome para *${item.nome}*?`);
+            return;
+        }
+
+        if (buttonId.startsWith('edit_preco_')) {
+            await sendTextMessage(from, `Qual o novo preço para *${item.nome}*? (Preço na lista: R$ ${item.precoFoto.toFixed(2).replace('.', ',')})`);
+            return; // Espera o texto do preço no próximo ciclo (mesmo estado)
+        }
+
+        if (buttonId.startsWith('edit_excluir_')) {
+            item.acao = 'remover';
+            await sendTextMessage(from, `🚫 *${item.nome}* será removido da lista final.`);
+            await delay(400);
+            await processLoteProdutos(from, loja, lista);
+            return;
+        }
+    }
+
+    if (contexto.estado === EstadosFluxo.AGUARDANDO_NOVO_NOME_EDICAO) {
+        const indiceReal = parseInt(contexto.acao ?? '0', 10);
+        const lista = contexto.alteracoesPlanejadas ?? [];
+        const item = lista[indiceReal];
+        const novoNome = userMessageText.trim();
+
+        if (novoNome.length < 3) {
+            await sendTextMessage(from, '⚠️ Nome muito curto. Por favor, digite o nome completo do produto.');
+            return;
+        }
+
+        const nomeAntigo = item.nome;
+        item.nome = novoNome;
+        
+        await sendTextMessage(from, `✅ Nome alterado de *${nomeAntigo}* para *${novoNome}*!`);
+        await delay(400);
+        await processLoteProdutos(from, loja, lista);
         return;
     }
     
@@ -1652,48 +1711,61 @@ JSON:`;
             return;
         }
 
-        const totalNovos = alteracoes.filter(a => a.acao === 'novo_cadastro').length;
-        const totalAtualizar = alteracoes.filter(a => a.acao === 'preco_atualizado').length;
-        const totalIgual = alteracoes.filter(a => a.acao === 'sem_alteracao').length;
-        const totalAmbiguo = alteracoes.filter(a => a.acao === 'ambiguo').length;
-
-        const cardsFoto = alteracoes.slice(0, 30).map((a, i) => {
-            const srcFonte: 'foto' | 'audio' = mimeType.startsWith('image') ? 'foto' : 'audio';
-            return formatarCartaoProduto(a, i, srcFonte);
-        }).join('\n');
-        const sufixoFoto = alteracoes.length > 30 ? `\n\n...e mais ${alteracoes.length - 30} item(s).` : '';
-
-        const contLinhasFoto: string[] = [];
-        if (totalNovos > 0) contLinhasFoto.push(`✅ ${totalNovos} novo(s)`);
-        if (totalAtualizar > 0) contLinhasFoto.push(`🔄 ${totalAtualizar} atualizar`);
-        if (totalIgual > 0) contLinhasFoto.push(`⏭️ ${totalIgual} sem alteração`);
-        if (totalAmbiguo > 0) contLinhasFoto.push(`⚠️ ${totalAmbiguo} ambíguo(s)`);
-
-        let resumo = `📋 *Resumo — ${alteracoes.length} produto(s)*\n`;
-        resumo += contLinhasFoto.join('  |  ') + '\n\n';
-        resumo += cardsFoto + sufixoFoto;
-
-        await salvarContexto(from, {
-            ...contexto,
-            estado: EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES,
-            itensPendenteConfirmacao: itensValidos,
-            alteracoesPlanejadas: alteracoes,
-        });
-
-        await sendTextMessage(from, resumo);
-        await delay(300);
-        await sendInteractiveButtons(from, `⚡ Confirma as alterações acima?`, [
-            { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar Todos' },
-            { id: 'editar_item_lista', title: '✏️ Editar um Item' },
-            { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar Tudo' },
-        ]);
-
+        await processLoteProdutos(from, loja, alteracoes, mimeType.startsWith('image') ? 'foto' : 'audio');
 
     } catch (err) {
         logger.error({ err, from }, '[Erro multimodal]');
         await sendTextMessage(from, '😕 Não consegui processar o arquivo. Por favor, *digite* o Nome, Preço e Unidade do produto.');
         await renovarTTLContexto(from);
     }
+}
+
+/**
+ * Consolida as alterações planejadas, gera o card de resumo e envia os botões de confirmação.
+ * Reutilizado após extração e após edições manuais do lojista.
+ */
+async function processLoteProdutos(from: string, loja: any, alteracoes: AlteracaoPlanejada[], fonte: 'foto' | 'audio' | 'manual' = 'manual'): Promise<void> {
+    const listaAtiva = alteracoes.filter(a => a.acao !== 'remover');
+
+    if (listaAtiva.length === 0) {
+        await sendTextMessage(from, 'Ø A lista de produtos está vazia.');
+        await limparContexto(from);
+        await enviarMenu(loja.nome, from);
+        return;
+    }
+
+    const totalNovos = listaAtiva.filter(a => a.acao === 'novo_cadastro').length;
+    const totalAtualizar = listaAtiva.filter(a => a.acao === 'preco_atualizado').length;
+    const totalIgual = listaAtiva.filter(a => a.acao === 'sem_alteracao').length;
+    const totalAmbiguo = listaAtiva.filter(a => a.acao === 'ambiguo').length;
+
+    const cards = listaAtiva.slice(0, 30).map((a, i) => {
+        return formatarCartaoProduto(a, i, fonte === 'manual' ? 'foto' : fonte);
+    }).join('\n');
+    const sufixo = listaAtiva.length > 30 ? `\n\n...e mais ${listaAtiva.length - 30} item(s).` : '';
+
+    const contLinhas: string[] = [];
+    if (totalNovos > 0) contLinhas.push(`✅ ${totalNovos} novo(s)`);
+    if (totalAtualizar > 0) contLinhas.push(`🔄 ${totalAtualizar} atualizar`);
+    if (totalIgual > 0) contLinhas.push(`⏭️ ${totalIgual} sem alteração`);
+    if (totalAmbiguo > 0) contLinhas.push(`⚠️ ${totalAmbiguo} ambíguo(s)`);
+
+    let resumo = `📋 *Resumo Atualizado — ${listaAtiva.length} produto(s)*\n`;
+    resumo += contLinhas.join('  |  ') + '\n\n';
+    resumo += cards + sufixo;
+
+    await salvarContexto(from, {
+        estado: EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES,
+        alteracoesPlanejadas: alteracoes,
+    });
+
+    await sendTextMessage(from, resumo);
+    await delay(300);
+    await sendInteractiveButtons(from, `⚡ Confirma as alterações acima?`, [
+        { id: 'confirmar_alteracoes_sim', title: '✅ Confirmar Todos' },
+        { id: 'editar_item_lista', title: '✏️ Editar um Item' },
+        { id: 'confirmar_alteracoes_nao', title: '❌ Cancelar Tudo' },
+    ]);
 }
 
 // ============================================================
