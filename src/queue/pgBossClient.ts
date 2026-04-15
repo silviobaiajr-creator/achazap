@@ -29,5 +29,9 @@ boss.on('error', (error: any) => logger.error({ err: error }, '[PgBoss] Erro int
 export async function startQueue() {
     await boss.start();
     await boss.createQueue('messages');
-    logger.info('[PgBoss] Fila iniciada com sucesso (PostgreSQL)');
+    
+    // Sprint Validade: Agendamento diário às 09:00 AM
+    await boss.schedule('check-validity', '0 9 * * *');
+    
+    logger.info('[PgBoss] Fila iniciada e agendamentos configurados');
 }
