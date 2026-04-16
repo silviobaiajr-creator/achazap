@@ -849,6 +849,44 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     }
 
     // ══════════════════════════════════════════════════════════
+    // CENÁRIO: Seleção de item no Relatório de Revisão
+    // ══════════════════════════════════════════════════════════
+    if (contexto && contexto.estado === EstadosFluxo.AGUARDANDO_SELECAO_REVISAO) {
+        const lista = contexto.alteracoesPlanejadas ?? [];
+        const textoNum = userMessageText.trim().toLowerCase();
+        let opcaoNum = parseInt(textoNum, 10);
+
+        // Se for um clique de botão (ex: Renovar Preços), o interceptador global lá em cima já tratou
+        // Aqui tratamos especificamente a entrada de texto (número)
+        if (isTextOnly && !isNaN(opcaoNum)) {
+            if (opcaoNum < 1 || opcaoNum > lista.length) {
+                await sendTextMessage(from, `⚠️ Opção inválida. Escolha um número entre *1* e *${lista.length}*, ou clique no botão abaixo.`);
+                return;
+            }
+
+            const item = lista[opcaoNum - 1];
+            
+            await salvarContexto(from, {
+                ...contexto,
+                estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO,
+                dadosProduto: { nome: item.nome, unidade: item.unidade },
+                perguntaPendente: `Qual o novo preço para *${item.nome}*?`,
+            });
+
+            await sendTextMessage(from, `Selecionado: *${item.nome}*\n💰 Qual o novo preço? (Ex: 8,50)`);
+            return;
+        }
+
+        // Se digitou algo que não é número e não é comando, volta ao IDLE para não prender o usuário
+        if (isTextOnly && textoNum.length > 0) {
+            await limparContexto(from);
+            // Deixa o fluxo seguir para o IDLE handler ou apenas encerra
+            await processMessage(msg); 
+            return;
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════
     // CENÁRIO 1/8/12: Estado IDLE (Inicia Ingestão Proativa)
     // ══════════════════════════════════════════════════════════
     if (!contexto || contexto.estado === EstadosFluxo.IDLE) {
@@ -2153,16 +2191,30 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
     let relatorio = `📋 *Relatório de Vencimento de Preços*\n`;
     relatorio += `Aqui estão os ${pendentes.length} item(ns) que precisam de atenção:\n\n`;
 
+    const alteracoes: AlteracaoPlanejada[] = [];
+
     pendentes.forEach((item, i) => {
         const selo = calcularSeloFrescor(item.updated_at);
         relatorio += `*${i+1}. ${item.produto_nome}*\n💰 R$ ${Number(item.preco).toFixed(2).replace('.', ',')} / ${item.unidade}\n⏱️ ${selo}\n\n`;
+        
+        // Salva para seleção posterior
+        alteracoes.push({
+            nome: item.produto_nome,
+            precoFoto: Number(item.preco),
+            unidade: item.unidade,
+            acao: 'preco_atualizado'
+        });
     });
 
-    relatorio += `Você pode atualizar agora enviando uma foto dos preços, um áudio ou apenas digitando os novos valores.`;
+    relatorio += `\n✍️ Digite o *NÚMERO* do item para atualizar agora.\n📷 Ou clique no botão para enviar uma *FOTO* de vários preços.`;
+
+    await salvarContexto(from, {
+        estado: EstadosFluxo.AGUARDANDO_SELECAO_REVISAO,
+        alteracoesPlanejadas: alteracoes,
+        perguntaPendente: 'Qual item deseja atualizar?',
+    });
 
     await sendInteractiveButtons(from, relatorio, [
         { id: 'menu_revisar_renovar', title: '🚀 Renovar Preços' }
     ]);
-    
-    // Removido o enviarMenu(loja.nome, from) para evitar excesso de mensagens (Zero-Noise)
 }
