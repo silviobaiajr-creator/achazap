@@ -1535,13 +1535,32 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         if (isInteractive && (buttonId === 'acao_atualizar' || buttonId === 'acao_retirar')) {
             const produto = contexto.dadosProduto as DadosProduto;
 
+            // Guarda proteção: valida que o contexto ainda está íntegro
+            if (!produto || !produto.nome || produto.nome.trim() === '') {
+                logger.error({ from, contexto }, '[acao_atualizar] Contexto inválido — produto sem nome');
+                await limparContexto(from);
+                await sendTextMessage(from, '⏳ Sessão expirada. Por favor, comece novamente pelo menu.');
+                await delay(300);
+                await enviarMenu(loja.nome, from);
+                return;
+            }
+
+            if (buttonId === 'acao_atualizar' && (produto.preco === null || produto.preco === undefined)) {
+                logger.error({ from, produto }, '[acao_atualizar] Preço ausente no contexto');
+                await limparContexto(from);
+                await sendTextMessage(from, '⏳ Sessão expirada. Por favor, comece novamente enviando o produto com o preço.');
+                await delay(300);
+                await enviarMenu(loja.nome, from);
+                return;
+            }
+
             // Sprint 3 #6 / Sprint 4 #5: limpar estado ANTES do banco (race condition)
             await limparContexto(from);
 
             if (buttonId === 'acao_atualizar') {
                 // Sprint 3 #2: LEDGER — INSERT nova linha, jamais UPDATE
                 await atualizarPrecoLedger(loja.id, produto.nome, produto.preco, produto.unidade);
-                await sendTextMessage(from, `✅ Preço de *${produto.nome}* atualizado para R$ ${produto.preco}!`);
+                await sendTextMessage(from, `✅ Preço de *${produto.nome}* atualizado para R$ ${Number(produto.preco).toFixed(2).replace('.', ',')}!`);
             } else {
                 // Sprint 4 #1/2/3: Soft Delete via INSERT com disponivel: false
                 await retirarEstoqueLedger(loja.id, produto.nome, produto.unidade);
@@ -1966,8 +1985,14 @@ async function ingeriCatalogo(lojaId: string, produto: DadosProduto, fonte: stri
  * registra o evento de mudança no ledger histórico (append-only).
  */
 async function atualizarPrecoLedger(lojaId: string, produtoNome: string, novoPreco: number, unidade: string): Promise<void> {
-    const nomeSeguro    = produtoNome.substring(0, 250);
-    const unidadeSegura = (unidade || 'un').substring(0, 30);
+    // Guards de segurança — nunca deixar undefined/null chegar no banco
+    if (!produtoNome || !lojaId) {
+        logger.error({ lojaId, produtoNome }, '[Ledger] atualizarPrecoLedger chamado com dados inválidos');
+        throw new Error('Dados inválidos para atualizar preço.');
+    }
+    const nomeSeguro    = String(produtoNome).substring(0, 250);
+    const unidadeSegura = String(unidade || 'un').substring(0, 30);
+    const precoSeguro   = Number(novoPreco) || 0;
 
     // ── Atualiza snapshot ──
     const { data: upserted, error: upsertError } = await supabase
@@ -1976,7 +2001,7 @@ async function atualizarPrecoLedger(lojaId: string, produtoNome: string, novoPre
             {
                 loja_id:        lojaId,
                 produto_nome:   nomeSeguro,
-                preco:          novoPreco,
+                preco:          precoSeguro,
                 unidade:        unidadeSegura,
                 disponivel:     true,
                 fonte_ingestao: 'manual',
@@ -1997,7 +2022,7 @@ async function atualizarPrecoLedger(lojaId: string, produtoNome: string, novoPre
         loja_id:        lojaId,
         produto_id:     upserted?.id,
         produto_nome:   nomeSeguro,
-        preco:          novoPreco,
+        preco:          precoSeguro,
         unidade:        unidadeSegura,
         disponivel:     true,
         fonte_ingestao: 'manual',
