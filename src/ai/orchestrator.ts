@@ -351,6 +351,9 @@ JSON:`;
 
             await salvarContexto(from, {
                 ...contexto,
+                // Bug Fix: força a transição de IDLE → AGUARDANDO_DADOS_PRODUTO
+                // Sem isso, o próximo "8 reais" chega em estado IDLE e é tratado como ruído
+                estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO,
                 dadosProduto: novosDados,
                 perguntaPendente: pergunta,
                 retries: novoRetries,
@@ -2066,30 +2069,45 @@ async function buscarOfertasAtivas(lojaId: string) {
 
 /**
  * Busca os itens com preços mais antigos para o Lojista revisar (Sprint Validade)
- */
+*/
 async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
-    const { data: antigos, error } = await supabase
-        .from('catalogo_ativo')
-        .select('produto_nome, preco, unidade, updated_at')
-        .eq('loja_id', loja.id)
-        .eq('disponivel', true)
-        .order('updated_at', { ascending: true })
-        .limit(5);
+    // Bug Fix: Supabase coloca NULLs por último no .order() ascendente.
+    // Solução: buscamos em duas etapas e juntamos: NULLs primeiro, depois os mais antigos.
+    const [{ data: semData }, { data: comData }] = await Promise.all([
+        supabase
+            .from('catalogo_ativo')
+            .select('produto_nome, preco, unidade, updated_at')
+            .eq('loja_id', loja.id)
+            .eq('disponivel', true)
+            .is('updated_at', null)
+            .limit(5),
+        supabase
+            .from('catalogo_ativo')
+            .select('produto_nome, preco, unidade, updated_at')
+            .eq('loja_id', loja.id)
+            .eq('disponivel', true)
+            .not('updated_at', 'is', null)
+            .order('updated_at', { ascending: true })
+            .limit(5),
+    ]);
 
-    if (error || !antigos || antigos.length === 0) {
-        await sendTextMessage(from, '✅ Todos os seus preços estão atualizados e com selo verde! Nada para revisar por enquanto.');
+    // Junta: itens sem data primeiro, depois os mais antigos, limita a 5
+    const todos = [...(semData ?? []), ...(comData ?? [])].slice(0, 5);
+
+    if (todos.length === 0) {
+        await sendTextMessage(from, '✅ Você ainda não tem nenhum produto cadastrado. Envie uma foto do encarte ou liste seus produtos para começar!');
         return;
     }
 
     let relatorio = `📋 *Relatório de Vencimento de Preços*\n`;
-    relatorio += `Estes itens estão próximos de perder o selo verde:\n\n`;
+    relatorio += `Aqui estão os ${todos.length} item(ns) que precisam de atenção:\n\n`;
 
-    antigos.forEach((item, i) => {
+    todos.forEach((item, i) => {
         const selo = calcularSeloFrescor(item.updated_at);
-        relatorio += `*${i+1}. ${item.produto_nome}*\n💰 R$ ${item.preco.toFixed(2).replace('.', ',')} / ${item.unidade}\n⏱️ ${selo}\n\n`;
+        relatorio += `*${i+1}. ${item.produto_nome}*\n💰 R$ ${Number(item.preco).toFixed(2).replace('.', ',')} / ${item.unidade}\n⏱️ ${selo}\n\n`;
     });
 
-    relatorio += `Para renovar, basta enviar uma nova foto do encarte ou audío com os preços atuais!`;
+    relatorio += `Para renovar o selo verde, basta enviar uma nova foto do encarte ou digitar o produto com o preço atualizado!`;
 
     await sendTextMessage(from, relatorio);
     await delay(500);
