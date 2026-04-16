@@ -2193,18 +2193,18 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
     const [{ data: semData }, { data: comData }] = await Promise.all([
         supabase
             .from('catalogo_ativo')
-            .select('produto_nome, preco, unidade, atualizado_em')
+            .select('produto_nome, preco, unidade, updated_at')
             .eq('loja_id', loja.id)
             .eq('disponivel', true)
-            .is('atualizado_em', null)
+            .is('updated_at', null)
             .limit(10),
         supabase
             .from('catalogo_ativo')
-            .select('produto_nome, preco, unidade, atualizado_em')
+            .select('produto_nome, preco, unidade, updated_at')
             .eq('loja_id', loja.id)
             .eq('disponivel', true)
-            .not('atualizado_em', 'is', null)
-            .order('atualizado_em', { ascending: true })
+            .not('updated_at', 'is', null)
+            .order('updated_at', { ascending: true })
             .limit(10),
     ]);
 
@@ -2212,8 +2212,8 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
     
     // Filtro inteligente: Só mostra o que realmente PRECISA de revisão (6 dias ou mais, ou NULL)
     const pendentes = todos.filter(item => {
-        if (!item.atualizado_em) return true;
-        const data = new Date(item.atualizado_em);
+        if (!item.updated_at) return true;
+        const data = new Date(item.updated_at);
         const agora = new Date();
         const diffDias = Math.floor((agora.getTime() - data.getTime()) / (1000 * 60 * 60 * 24));
         return diffDias >= 6;
@@ -2230,7 +2230,7 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
     const alteracoes: AlteracaoPlanejada[] = [];
 
     pendentes.forEach((item, i) => {
-        const selo = calcularSeloFrescor(item.atualizado_em);
+        const selo = calcularSeloFrescor(item.updated_at);
         relatorio += `*${i+1}. ${item.produto_nome}*\n💰 R$ ${Number(item.preco).toFixed(2).replace('.', ',')} / ${item.unidade} ${selo}\n`;
         alteracoes.push({
             nome: item.produto_nome,
