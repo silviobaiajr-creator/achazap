@@ -2111,8 +2111,7 @@ async function buscarOfertasAtivas(lojaId: string) {
  * Busca os itens com preços mais antigos para o Lojista revisar (Sprint Validade)
 */
 async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
-    // Bug Fix: Supabase coloca NULLs por último no .order() ascendente.
-    // Solução: buscamos em duas etapas e juntamos: NULLs primeiro, depois os mais antigos.
+    // Busca em duas etapas: NULLs primeiro, depois os mais antigos.
     const [{ data: semData }, { data: comData }] = await Promise.all([
         supabase
             .from('catalogo_ativo')
@@ -2120,7 +2119,7 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
             .eq('loja_id', loja.id)
             .eq('disponivel', true)
             .is('updated_at', null)
-            .limit(5),
+            .limit(10),
         supabase
             .from('catalogo_ativo')
             .select('produto_nome, preco, unidade, updated_at')
@@ -2128,28 +2127,38 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
             .eq('disponivel', true)
             .not('updated_at', 'is', null)
             .order('updated_at', { ascending: true })
-            .limit(5),
+            .limit(10),
     ]);
 
-    // Junta: itens sem data primeiro, depois os mais antigos, limita a 5
-    const todos = [...(semData ?? []), ...(comData ?? [])].slice(0, 5);
+    const todos = [...(semData ?? []), ...(comData ?? [])];
+    
+    // Filtro inteligente: Só mostra o que realmente PRECISA de revisão (6 dias ou mais, ou NULL)
+    const pendentes = todos.filter(item => {
+        if (!item.updated_at) return true;
+        const data = new Date(item.updated_at);
+        const agora = new Date();
+        const diffDias = Math.floor((agora.getTime() - data.getTime()) / (1000 * 60 * 60 * 24));
+        return diffDias >= 6;
+    }).slice(0, 5); // Mostra os 5 mais críticos
 
-    if (todos.length === 0) {
-        await sendTextMessage(from, '✅ Você ainda não tem nenhum produto cadastrado. Envie uma foto do encarte ou liste seus produtos para começar!');
+    if (pendentes.length === 0) {
+        await sendTextMessage(from, '✅ *Tudo verdinho!* Todos os seus preços foram atualizados recentemente e estão com selo de confiança dos clientes. Bom trabalho!');
         return;
     }
 
     let relatorio = `📋 *Relatório de Vencimento de Preços*\n`;
-    relatorio += `Aqui estão os ${todos.length} item(ns) que precisam de atenção:\n\n`;
+    relatorio += `Aqui estão os ${pendentes.length} item(ns) que precisam de atenção:\n\n`;
 
-    todos.forEach((item, i) => {
+    pendentes.forEach((item, i) => {
         const selo = calcularSeloFrescor(item.updated_at);
         relatorio += `*${i+1}. ${item.produto_nome}*\n💰 R$ ${Number(item.preco).toFixed(2).replace('.', ',')} / ${item.unidade}\n⏱️ ${selo}\n\n`;
     });
 
-    relatorio += `Para renovar o selo verde, basta enviar uma nova foto do encarte ou digitar o produto com o preço atualizado!`;
+    relatorio += `Você pode atualizar agora enviando uma foto dos preços, um áudio ou apenas digitando os novos valores.`;
 
-    await sendTextMessage(from, relatorio);
-    await delay(500);
-    await enviarMenu(loja.nome, from);
+    await sendInteractiveButtons(from, relatorio, [
+        { id: 'menu_cadastrar', title: '🚀 Renovar Preços' }
+    ]);
+    
+    // Removido o enviarMenu(loja.nome, from) para evitar excesso de mensagens (Zero-Noise)
 }
