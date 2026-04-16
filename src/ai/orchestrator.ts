@@ -369,6 +369,13 @@ JSON:`;
             unidade: (nullSafe(dados.unidade, dadosExistentes?.unidade) ?? 'un').substring(0, 30),
         };
 
+        // Validação de segurança antes de avançar
+        if (!produto.nome || produto.nome.trim() === '') {
+            await sendTextMessage(from, 'Não consegui identificar o nome do produto. Por favor, informe o nome junto com o preço. Ex: *Arroz 8,00*');
+            await limparContexto(from);
+            return;
+        }
+
         logger.debug({ from, produto }, '[Debug] Produto extraído');
 
         // Busca similares (peneira) e continua o fluxo
@@ -774,6 +781,14 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     if (fugou) return;
     // Reler contexto após fuga (contexto pode ter sido limpo)
     contexto = await lerContexto(from) as ContextoSessao | null;
+
+    // ══════════════════════════════════════════════════════════
+    // INTERCEPTADOR GLOBAL: Comandos especiais (qualquer estado)
+    // ══════════════════════════════════════════════════════════
+    if (isTextOnly && userMessageText.toLowerCase().trim().startsWith('/revisar')) {
+        await processarRevisaoPrecos(from, loja);
+        return;
+    }
 
     // ══════════════════════════════════════════════════════════
     // BOTÕES DE NAVEGAÇÃO DO MENU (aceitos mesmo em IDLE)
