@@ -2070,10 +2070,14 @@ async function atualizarPrecoLedger(lojaId: string, produtoNome: string, novoPre
     const precoSeguro   = Number(novoPreco) || 0;
 
     // ── Atualiza snapshot ──
-    // Usa atualizado_em (coluna nativa do schema) para compatibilidade com o Supabase.
-    // updated_at é alias adicionado posteriormente e pode falhar por cache de schema.
+    // updated_at: rastreia quando o LOJISTA revisou o preço (usado pelo /revisar)
+    // atualizado_em: rastreia qualquer alteração no banco (coluna nativa do schema)
     const agora = new Date().toISOString();
-    const { data: upserted, error: upsertError } = await supabase
+
+    let upserted: { id: string } | null = null;
+
+    // Tenta com updated_at (cache do PostgREST deve estar atualizado após NOTIFY)
+    const { data: tentativa1, error: erro1 } = await supabase
         .from('catalogo_ativo')
         .upsert(
             {
@@ -2084,15 +2088,43 @@ async function atualizarPrecoLedger(lojaId: string, produtoNome: string, novoPre
                 disponivel:     true,
                 fonte_ingestao: 'manual',
                 atualizado_em:  agora,
+                updated_at:     agora,
             },
             { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
         )
         .select('id')
         .single();
 
-    if (upsertError) {
-        logger.error({ error: upsertError }, '[Ledger] Erro ao atualizar preço em catalogo_ativo');
+    if (erro1?.code === 'PGRST204') {
+        // Schema cache ainda desatualizado — fallback sem updated_at
+        logger.warn({ lojaId }, '[Ledger] PGRST204: updated_at não reconhecido, usando fallback atualizado_em');
+        const { data: tentativa2, error: erro2 } = await supabase
+            .from('catalogo_ativo')
+            .upsert(
+                {
+                    loja_id:        lojaId,
+                    produto_nome:   nomeSeguro,
+                    preco:          precoSeguro,
+                    unidade:        unidadeSegura,
+                    disponivel:     true,
+                    fonte_ingestao: 'manual',
+                    atualizado_em:  agora,
+                },
+                { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
+            )
+            .select('id')
+            .single();
+
+        if (erro2) {
+            logger.error({ error: erro2 }, '[Ledger] Erro ao atualizar preço em catalogo_ativo');
+            throw new Error('Falha ao atualizar preço.');
+        }
+        upserted = tentativa2;
+    } else if (erro1) {
+        logger.error({ error: erro1 }, '[Ledger] Erro ao atualizar preço em catalogo_ativo');
         throw new Error('Falha ao atualizar preço.');
+    } else {
+        upserted = tentativa1;
     }
 
     // ── Registra evento no histórico ──
