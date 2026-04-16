@@ -176,8 +176,9 @@ async function detectarIntencaoProativa(texto: string): Promise<boolean> {
     try {
         const result = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: `Analise se o usuário está tentando cadastrar um produto (mencionando nome e preço) ou apenas conversando/dando oi. 
-            Exemplos de cadastro: "Cerveja 5,00", "Lança aí: Leite 4.50", "Acrescenta pão 0,50".
+            contents: `Analise se o usuário está tentando cadastrar um produto no estoque ou apenas conversando/dando oi. 
+            Se a mensagem for simplesmente o NOME de um produto (ex: "Acem", "Arroz", "Cerveja") ou contiver preço (ex: "Lança aí: Leite 4.50"), é cadastro.
+            Se for saudação ou pergunta genérica (ex: "Oi", "Como funciona?"), não é cadastro.
             Retorne APENAS o JSON: {"intencao_cadastro": boolean}\n\nFrase: "${texto}"\n\nJSON:`,
             config: { responseMimeType: 'application/json' },
         });
@@ -1916,6 +1917,7 @@ async function ingeriCatalogo(lojaId: string, produto: DadosProduto, fonte: stri
                 unidade:        unidadeSegura,
                 disponivel:     true,
                 fonte_ingestao: fonte,
+                updated_at:     new Date().toISOString(),
             },
             { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
         )
@@ -1960,6 +1962,7 @@ async function atualizarPrecoLedger(lojaId: string, produtoNome: string, novoPre
                 unidade:        unidadeSegura,
                 disponivel:     true,
                 fonte_ingestao: 'manual',
+                updated_at:     new Date().toISOString(),
             },
             { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
         )
