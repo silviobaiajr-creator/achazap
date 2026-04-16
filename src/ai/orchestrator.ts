@@ -849,40 +849,72 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     }
 
     // ══════════════════════════════════════════════════════════
-    // CENÁRIO: Seleção de item no Relatório de Revisão
+    // CENÁRIO: Seleção de item no Relatório de Revisão
     // ══════════════════════════════════════════════════════════
     if (contexto && contexto.estado === EstadosFluxo.AGUARDANDO_SELECAO_REVISAO) {
         const lista = contexto.alteracoesPlanejadas ?? [];
-        const textoNum = userMessageText.trim().toLowerCase();
-        let opcaoNum = parseInt(textoNum, 10);
 
-        // Se for um clique de botão (ex: Renovar Preços), o interceptador global lá em cima já tratou
-        // Aqui tratamos especificamente a entrada de texto (número)
-        if (isTextOnly && !isNaN(opcaoNum)) {
-            if (opcaoNum < 1 || opcaoNum > lista.length) {
-                await sendTextMessage(from, `⚠️ Opção inválida. Escolha um número entre *1* e *${lista.length}*, ou clique no botão abaixo.`);
-                return;
+        // Detecta pares "número valor" na mensagem (ex: "1 8,50 2 15,00 3 7,99")
+        // Suporta separadores: espaço, tab, vírgula como decimal ou ponto
+        const pairsRegex = /(\d+)\s+([\d]+[.,][\d]+|[\d]+)/g;
+        const pares: { idx: number; preco: number }[] = [];
+        let match: RegExpExecArray | null;
+
+        while ((match = pairsRegex.exec(userMessageText)) !== null) {
+            const idx   = parseInt(match[1]!, 10);
+            const preco = parseFloat(match[2]!.replace(',', '.'));
+            if (!isNaN(idx) && !isNaN(preco) && idx >= 1 && idx <= lista.length && preco > 0) {
+                pares.push({ idx, preco });
+            }
+        }
+
+        if (isTextOnly && pares.length > 0) {
+            // Atualiza cada par no banco
+            const resultados: string[] = [];
+            for (const par of pares) {
+                const item = lista[par.idx - 1]!;
+                await atualizarPrecoLedger(loja.id, item.nome, par.preco, item.unidade);
+                resultados.push(`✅ *${par.idx}. ${item.nome}* → R$ ${par.preco.toFixed(2).replace('.', ',')} / ${item.unidade}`);
+                // Marca como atualizado na lista em memória
+                item.acao = 'sem_alteracao';
+                item.precoFoto = par.preco;
             }
 
-            const item = lista[opcaoNum - 1];
-            
-            await salvarContexto(from, {
-                ...contexto,
-                estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO,
-                acao: 'revisar_selecao',  // flag que bypassa Gemini e similares
-                dadosProduto: { nome: item.nome, unidade: item.unidade },
-                perguntaPendente: `Qual o novo preço para *${item.nome}*?`,
-            });
+            const atualizadosIds = new Set(pares.map(p => p.idx));
+            const pendentes = lista.filter((_: AlteracaoPlanejada, i: number) => !atualizadosIds.has(i + 1));
 
-            await sendTextMessage(from, `Selecionado: *${item.nome}*\n💰 Qual o novo preço? (Ex: 8,50)`);
+            // Feedback do que foi atualizado
+            const feedbackMsg = `*Preços atualizados:*\n` + resultados.join('\n');
+
+            if (pendentes.length === 0) {
+                // Todos concluídos!
+                await sendTextMessage(from, feedbackMsg + '\n\n🎉 *Todos os preços estão atualizados!* Obrigado por manter seu catálogo fresquinho.');
+                await limparContexto(from);
+                await delay(400);
+                await enviarMenu(loja.nome, from);
+            } else {
+                // Ainda há pendentes — mostrar lista atualizada
+                let novaLista = `${feedbackMsg}\n\n📋 *Ainda pendentes:*\n`;
+                pendentes.forEach((item: AlteracaoPlanejada, i: number) => {
+                    const idxOriginal = lista.indexOf(item) + 1;
+                    const selo = calcularSeloFrescor(undefined);
+                    novaLista += `*${idxOriginal}. ${item.nome}* \u2014 R$ ${item.precoFoto.toFixed(2).replace('.', ',')} / ${item.unidade} ${selo}\n`;
+                });
+                novaLista += `\n✏️ _Ex: *${pendentes.map((_: AlteracaoPlanejada, i: number) => `${lista.indexOf(pendentes[i]!) + 1} 0,00`).slice(0, 2).join(' ')}_`;
+
+                await salvarContexto(from, {
+                    ...contexto,
+                    alteracoesPlanejadas: lista,
+                });
+                await sendTextMessage(from, novaLista);
+            }
             return;
         }
 
-        // Se digitou algo que não é número e não é comando, volta ao IDLE para não prender o usuário
-        if (isTextOnly && textoNum.length > 0) {
-            await limparContexto(from);
-            // Deixa o fluxo seguir para o IDLE handler ou apenas encerra
-            await processMessage(msg); 
+        // Entrada não reconhecida — lembrar instrução
+        if (isTextOnly && userMessageText.trim().length > 0) {
+            const exemplo = lista.slice(0, 2).map((_: AlteracaoPlanejada, i: number) => `${i + 1} 0,00`).join(' ');
+            await sendTextMessage(from, `✍️ Digite o número e o preço separados por espaço.\nEx: *${exemplo}*\n\nVocê pode atualizar vários de uma vez!`);
             return;
         }
     }
@@ -1447,28 +1479,6 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
         if (msg.type === 'interactive') {
             await sendTextMessage(from, 'Por favor, *digite* o nome, preço e unidade do produto. Ex: Feijão Preto 15,00 kg');
-            return;
-        }
-
-        // ── Bypass de Revisão: produto já selecionado, só precisa do preço ──
-        if (contexto.acao === 'revisar_selecao' && contexto.dadosProduto?.nome) {
-            const nomeProduto  = contexto.dadosProduto.nome;
-            const unidade      = contexto.dadosProduto.unidade ?? 'un';
-            const textoPreco   = userMessageText.trim().replace(',', '.');
-            const novoPreco    = parseFloat(textoPreco);
-
-            if (isNaN(novoPreco) || novoPreco <= 0) {
-                await sendTextMessage(from, `⚠️ Preço inválido. Por favor, digite apenas o valor (ex: *8,50*) para *${nomeProduto}*.`);
-                await renovarTTLContexto(from);
-                return;
-            }
-
-            await sendTextMessage(from, `⏳ Atualizando preço de *${nomeProduto}*...`);
-            await atualizarPrecoLedger(loja.id, nomeProduto, novoPreco, unidade);
-            await sendTextMessage(from, `✅ Preço de *${nomeProduto}* atualizado para *R$ ${novoPreco.toFixed(2).replace('.', ',')} / ${unidade}*!`);
-            await limparContexto(from);
-            await delay(400);
-            await enviarMenu(loja.nome, from);
             return;
         }
 
@@ -2183,18 +2193,18 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
     const [{ data: semData }, { data: comData }] = await Promise.all([
         supabase
             .from('catalogo_ativo')
-            .select('produto_nome, preco, unidade, updated_at')
+            .select('produto_nome, preco, unidade, atualizado_em')
             .eq('loja_id', loja.id)
             .eq('disponivel', true)
-            .is('updated_at', null)
+            .is('atualizado_em', null)
             .limit(10),
         supabase
             .from('catalogo_ativo')
-            .select('produto_nome, preco, unidade, updated_at')
+            .select('produto_nome, preco, unidade, atualizado_em')
             .eq('loja_id', loja.id)
             .eq('disponivel', true)
-            .not('updated_at', 'is', null)
-            .order('updated_at', { ascending: true })
+            .not('atualizado_em', 'is', null)
+            .order('atualizado_em', { ascending: true })
             .limit(10),
     ]);
 
@@ -2202,12 +2212,12 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
     
     // Filtro inteligente: Só mostra o que realmente PRECISA de revisão (6 dias ou mais, ou NULL)
     const pendentes = todos.filter(item => {
-        if (!item.updated_at) return true;
-        const data = new Date(item.updated_at);
+        if (!item.atualizado_em) return true;
+        const data = new Date(item.atualizado_em);
         const agora = new Date();
         const diffDias = Math.floor((agora.getTime() - data.getTime()) / (1000 * 60 * 60 * 24));
         return diffDias >= 6;
-    }).slice(0, 5); // Mostra os 5 mais críticos
+    }).slice(0, 8); // Mostra os 8 mais críticos
 
     if (pendentes.length === 0) {
         await sendTextMessage(from, '✅ *Tudo verdinho!* Todos os seus preços foram atualizados recentemente e estão com selo de confiança dos clientes. Bom trabalho!');
@@ -2215,15 +2225,13 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
     }
 
     let relatorio = `📋 *Relatório de Vencimento de Preços*\n`;
-    relatorio += `Aqui estão os ${pendentes.length} item(ns) que precisam de atenção:\n\n`;
+    relatorio += `${pendentes.length} item(s) precisam de atenção:\n\n`;
 
     const alteracoes: AlteracaoPlanejada[] = [];
 
     pendentes.forEach((item, i) => {
-        const selo = calcularSeloFrescor(item.updated_at);
-        relatorio += `*${i+1}. ${item.produto_nome}*\n💰 R$ ${Number(item.preco).toFixed(2).replace('.', ',')} / ${item.unidade}\n⏱️ ${selo}\n\n`;
-        
-        // Salva para seleção posterior
+        const selo = calcularSeloFrescor(item.atualizado_em);
+        relatorio += `*${i+1}. ${item.produto_nome}*\n💰 R$ ${Number(item.preco).toFixed(2).replace('.', ',')} / ${item.unidade} ${selo}\n`;
         alteracoes.push({
             nome: item.produto_nome,
             precoFoto: Number(item.preco),
@@ -2232,15 +2240,16 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
         });
     });
 
-    relatorio += `\n✍️ Digite o *NÚMERO* do item para atualizar agora.\n📷 Ou clique no botão para enviar uma *FOTO* de vários preços.`;
+    // Gera exemplo dinâmico com os 2 primeiros itens
+    const ex1 = pendentes.length >= 1 ? `1 ${Number(pendentes[0]!.preco).toFixed(2).replace('.', ',')}` : '1 0,00';
+    const ex2 = pendentes.length >= 2 ? ` 2 ${Number(pendentes[1]!.preco).toFixed(2).replace('.', ',')}` : '';
+    relatorio += `\n✍️ Digite o número e o novo preço.\nEx: *${ex1}${ex2}*\n_Você pode atualizar vários de uma vez!_`;
 
     await salvarContexto(from, {
         estado: EstadosFluxo.AGUARDANDO_SELECAO_REVISAO,
         alteracoesPlanejadas: alteracoes,
-        perguntaPendente: 'Qual item deseja atualizar?',
+        perguntaPendente: 'Digite o número e o novo preço.',
     });
 
-    await sendInteractiveButtons(from, relatorio, [
-        { id: 'menu_revisar_renovar', title: '🚀 Renovar Preços' }
-    ]);
+    await sendTextMessage(from, relatorio);
 }
