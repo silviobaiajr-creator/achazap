@@ -797,14 +797,18 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     if (isInteractive && buttonId.startsWith('menu_')) {
         const acao = buttonId.replace('menu_', '');
 
-        if (acao === 'cadastrar') {
+        if (acao === 'cadastrar' || acao === 'revisar_renovar') {
+            const msgInstrucao = acao === 'revisar_renovar'
+                ? 'Ótimo! Vamos renovar seus preços. Você pode:\n\n📷 Tirar uma *foto* do encarte ou prateleira\n🎙️ Mandar um *áudio* rápido\n✍️ Ou *digitar* os novos valores (ex: Arroz 8,50)\n\nEstou aguardando!'
+                : 'Ótimo! Para cadastrar ou atualizar produtos, você pode:\n\n📷 Tirar uma *foto* do encarte\n🎙️ Mandar um *áudio*\n✍️ Ou *digitar* o nome e preço (ex: Feijão 10,00)\n\nO que deseja enviar?';
+
             await salvarContexto(from, {
                 estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO,
-                acao: 'cadastrar',
-                perguntaPendente: 'Por favor, digite o *Nome*, *Preço* e *Unidade* do produto.\nEx: Feijão Preto 15,00 kg',
+                acao: acao,
+                perguntaPendente: msgInstrucao,
                 retries: 0,
             });
-            await sendTextMessage(from, 'Por favor, digite o *Nome*, *Preço* e *Unidade* do produto.\nEx: Feijão Preto 15,00 kg');
+            await sendTextMessage(from, msgInstrucao);
             return;
         }
 
@@ -2157,7 +2161,7 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
     relatorio += `Você pode atualizar agora enviando uma foto dos preços, um áudio ou apenas digitando os novos valores.`;
 
     await sendInteractiveButtons(from, relatorio, [
-        { id: 'menu_cadastrar', title: '🚀 Renovar Preços' }
+        { id: 'menu_revisar_renovar', title: '🚀 Renovar Preços' }
     ]);
     
     // Removido o enviarMenu(loja.nome, from) para evitar excesso de mensagens (Zero-Noise)
