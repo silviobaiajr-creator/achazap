@@ -869,6 +869,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             await salvarContexto(from, {
                 ...contexto,
                 estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO,
+                acao: 'revisar_selecao',  // flag que bypassa Gemini e similares
                 dadosProduto: { nome: item.nome, unidade: item.unidade },
                 perguntaPendente: `Qual o novo preço para *${item.nome}*?`,
             });
@@ -1446,6 +1447,28 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
         if (msg.type === 'interactive') {
             await sendTextMessage(from, 'Por favor, *digite* o nome, preço e unidade do produto. Ex: Feijão Preto 15,00 kg');
+            return;
+        }
+
+        // ── Bypass de Revisão: produto já selecionado, só precisa do preço ──
+        if (contexto.acao === 'revisar_selecao' && contexto.dadosProduto?.nome) {
+            const nomeProduto  = contexto.dadosProduto.nome;
+            const unidade      = contexto.dadosProduto.unidade ?? 'un';
+            const textoPreco   = userMessageText.trim().replace(',', '.');
+            const novoPreco    = parseFloat(textoPreco);
+
+            if (isNaN(novoPreco) || novoPreco <= 0) {
+                await sendTextMessage(from, `⚠️ Preço inválido. Por favor, digite apenas o valor (ex: *8,50*) para *${nomeProduto}*.`);
+                await renovarTTLContexto(from);
+                return;
+            }
+
+            await sendTextMessage(from, `⏳ Atualizando preço de *${nomeProduto}*...`);
+            await atualizarPrecoLedger(loja.id, nomeProduto, novoPreco, unidade);
+            await sendTextMessage(from, `✅ Preço de *${nomeProduto}* atualizado para *R$ ${novoPreco.toFixed(2).replace('.', ',')} / ${unidade}*!`);
+            await limparContexto(from);
+            await delay(400);
+            await enviarMenu(loja.nome, from);
             return;
         }
 
@@ -2037,6 +2060,9 @@ async function atualizarPrecoLedger(lojaId: string, produtoNome: string, novoPre
     const precoSeguro   = Number(novoPreco) || 0;
 
     // ── Atualiza snapshot ──
+    // Usa atualizado_em (coluna nativa do schema) para compatibilidade com o Supabase.
+    // updated_at é alias adicionado posteriormente e pode falhar por cache de schema.
+    const agora = new Date().toISOString();
     const { data: upserted, error: upsertError } = await supabase
         .from('catalogo_ativo')
         .upsert(
@@ -2047,7 +2073,7 @@ async function atualizarPrecoLedger(lojaId: string, produtoNome: string, novoPre
                 unidade:        unidadeSegura,
                 disponivel:     true,
                 fonte_ingestao: 'manual',
-                updated_at:     new Date().toISOString(),
+                atualizado_em:  agora,
             },
             { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
         )
