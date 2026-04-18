@@ -1060,6 +1060,8 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             let atualizados = 0;
             let duplicatas = 0;
             
+            const listaAtualizados: string[] = [];
+
             for (const alt of alteracoes) {
                 if (alt.acao === 'remover') continue; // Pula itens excluídos pelo lojista
 
@@ -1069,16 +1071,29 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 } else if (alt.acao === 'preco_atualizado' && alt.produtoExistente) {
                     await atualizarPrecoLedger(loja.id, alt.produtoExistente.produto_nome, alt.precoFoto, alt.unidade || alt.produtoExistente.unidade);
                     atualizados++;
+                    if (listaAtualizados.length < 10) {
+                        const pAntigo = alt.produtoExistente.preco.toFixed(2).replace('.', ',');
+                        const pNovo = alt.precoFoto.toFixed(2).replace('.', ',');
+                        listaAtualizados.push(`• ${alt.produtoExistente.produto_nome}: R$ ${pAntigo} ➔ *R$ ${pNovo}*`);
+                    }
                 } else {
                     duplicatas++;
                 }
             }
             
-            const partes: string[] = [];
-            if (inseridos > 0)   partes.push(`✅ *${inseridos}* novo(s) cadastrado(s)`);
-            if (atualizados > 0) partes.push(`🔄 *${atualizados}* preço(s) atualizado(s)`);
-            if (duplicatas > 0)  partes.push(`⏭️ *${duplicatas}* sem alteração (mesmo preço)`);
-            await sendTextMessage(from, partes.join('\n'));
+            let mensagemFinal = `🎉 *Importação Concluída!*\n`;
+            if (inseridos > 0)   mensagemFinal += `\n🆕 *${inseridos} novo(s) cadastrado(s)*`;
+            if (duplicatas > 0)  mensagemFinal += `\n⏭️ *${duplicatas} sem alteração (mesmo preço)*`;
+            
+            if (atualizados > 0) {
+                mensagemFinal += `\n\n🔄 *${atualizados} preço(s) atualizado(s)*\n`;
+                mensagemFinal += listaAtualizados.join('\n');
+                if (atualizados > 10) {
+                    mensagemFinal += `\n...e mais ${atualizados - 10} item(s).`;
+                }
+            }
+
+            await sendTextMessage(from, mensagemFinal.trim());
             await limparContexto(from);
             await delay(400);
             await enviarMenu(loja.nome, from);

@@ -182,6 +182,7 @@ JSON:`;
 
         const lojaLockKey = hashLojaId(loja.id);
         let inseridos = 0, atualizados = 0, ignorados = 0, semAlteracao = 0;
+        const amostraAtualizados: string[] = [];
 
         const client = await pool.connect();
         try {
@@ -273,8 +274,16 @@ JSON:`;
                             'csv',
                         ]);
 
-                        if (isNovo) inseridos++;
-                        else atualizados++;
+                        if (isNovo) {
+                            inseridos++;
+                        } else {
+                            atualizados++;
+                            if (amostraAtualizados.length < 10 && precoAtual !== undefined) {
+                                const pAntigo = precoAtual.toFixed(2).replace('.', ',');
+                                const pNovo = preco.toFixed(2).replace('.', ',');
+                                amostraAtualizados.push(`• ${nome}: R$ ${pAntigo} ➔ *R$ ${pNovo}*`);
+                            }
+                        }
                     }
 
                     if (linhasNovas.length > 0) {
@@ -326,15 +335,20 @@ JSON:`;
         }
 
         // ── Relatório Final ──────────────────────────────────────────────────
-        const linhasRelatorio = [
-            `🎉 *Importação Concluída!*\n`,
-            inseridos  > 0 ? `🆕 ${inseridos} produto(s) novo(s)` : null,
-            atualizados > 0 ? `🔄 ${atualizados} preço(s) atualizado(s) (histórico salvo)` : null,
-            semAlteracao > 0 ? `✔️ ${semAlteracao} sem alteração (preço igual)` : null,
-            ignorados  > 0 ? `⚠️ ${ignorados} linha(s) inválida(s) ignorada(s)` : null,
-        ].filter(Boolean).join('\n');
+        let relatorio = `🎉 *Importação Concluída!*\n`;
+        if (inseridos > 0) relatorio += `\n🆕 *${inseridos} produto(s) novo(s)*`;
+        if (semAlteracao > 0) relatorio += `\n⏭️ *${semAlteracao} sem alteração (preço igual)*`;
+        if (ignorados > 0) relatorio += `\n⚠️ *${ignorados} linha(s) inválida(s) ignorada(s)*`;
 
-        await sendTextMessage(from, linhasRelatorio);
+        if (atualizados > 0) {
+            relatorio += `\n\n🔄 *${atualizados} preço(s) atualizado(s)*\n`;
+            relatorio += amostraAtualizados.join('\n');
+            if (atualizados > 10) {
+                relatorio += `\n...e mais ${atualizados - 10} item(s).`;
+            }
+        }
+
+        await sendTextMessage(from, relatorio.trim());
 
         // UX Post-Import: Limpa contextos fantasmas e guia o lojista
         await limparContexto(from);
