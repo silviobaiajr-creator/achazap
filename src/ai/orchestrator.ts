@@ -16,6 +16,8 @@ import {
     adquirirLock,
     liberarLock,
     cache,
+    incrementarBucketMidia,
+    ttlBucketMidia,
 } from '../lib/redis-cloud.js';
 import { supabaseAdmin as supabase } from '../lib/supabase.js';
 import { EstadosFluxo, ContextoSessao, DadosProduto, DadosOferta, AlteracaoPlanejada } from './types.js';
@@ -965,9 +967,51 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     // ══════════════════════════════════════════════════════════
     if (!contexto || contexto.estado === EstadosFluxo.IDLE) {
         
-        // 🎙️ Ingestão Proativa: Mídia (Foto/Áudio) em IDLE
+        // 🎙️ Ingestão Proativa: Mídia em IDLE — 3 camadas de proteção de tokens
         if (isMediaOnly) {
-            logger.info({ from }, '[Proativo] Mídia detectada em IDLE. Iniciando extração...');
+
+            // ── CAMADA 1: Bloquear sticker e vídeo (nunca contêm preços) ──
+            if (msg.type === 'sticker') {
+                await sendTextMessage(from, '🎉 Recebi sua figurinha! Para cadastrar produtos, envie uma 📷 foto ou 🎙️ áudio com os dados.');
+                return;
+            }
+            if (msg.type === 'video') {
+                await sendTextMessage(from, '🎬 Recebi seu vídeo, mas não consigo extrair preços dele. Tire uma 📷 foto do encarte ou mande um 🎙️ áudio!');
+                return;
+            }
+
+            // ── CAMADA 2: Filtro por tamanho (metadados da Meta, custo zero) ──
+            const TAMANHO_MINIMO_BYTES = 15 * 1024; // 15 KB
+            const mediaInfoRaw = (msg as any).image || (msg as any).audio || (msg as any).voice;
+            const fileSizeRaw: number = mediaInfoRaw?.file_size ?? 0;
+            // Só filtra se a Meta informou o tamanho (> 0) para evitar falsos positivos
+            if (fileSizeRaw > 0 && fileSizeRaw < TAMANHO_MINIMO_BYTES) {
+                const msgCamada2 = msg.type === 'image'
+                    ? '📷 A foto chegou com qualidade baixa demais para eu ler os produtos. Pode tirar outra com boa iluminação?'
+                    : '🎙️ O áudio chegou muito curto ou com qualidade baixa. Pode gravar novamente falando o nome e o preço?';
+                await sendTextMessage(from, msgCamada2);
+                return;
+            }
+
+            // ── CAMADA 3: Token Bucket — máx 10 mídias/hora por lojista ──
+            const bucketExcedido = incrementarBucketMidia(from);
+            if (bucketExcedido) {
+                const ttlSecs = ttlBucketMidia(from);
+                const mins = Math.floor(ttlSecs / 60);
+                const secs = ttlSecs % 60;
+                const tempoRestante = mins > 0
+                    ? `${mins} minuto${mins > 1 ? 's' : ''}`
+                    : `${secs} segundo${secs > 1 ? 's' : ''}`;
+                const msgCamada3 = msg.type === 'image'
+                    ? `⏳ Estou processando suas últimas fotos! Você poderá enviar mais em *${tempoRestante}*. Enquanto isso, pode *digitar* os produtos (Ex: Feijão 8,50).`
+                    : `⏳ Estou processando seus últimos áudios! Você poderá enviar mais em *${tempoRestante}*. Enquanto isso, pode *digitar* os produtos (Ex: Feijão 8,50).`;
+                logger.warn({ from, ttlSecs }, '[Camada3] Token bucket de mídia excedido');
+                await sendTextMessage(from, msgCamada3);
+                return;
+            }
+
+            // ── Passou pelas 3 camadas: processar normalmente ──
+            logger.info({ from }, '[Proativo] Mídia validada pelas 3 camadas. Iniciando extração...');
             await processarMidia(msg, from, loja, { estado: EstadosFluxo.IDLE });
             return;
         }

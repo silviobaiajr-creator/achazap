@@ -90,3 +90,39 @@ export async function renovarTTLContexto(whatsapp: string): Promise<void> {
 export async function verificarConexao(): Promise<boolean> {
     return true; // sempre true pois está em memória nativa
 }
+
+// ============================================================
+// Token Bucket para Mídias (Camada 3 de proteção proativa)
+// ============================================================
+const BUCKET_MIDIA_LIMITE = 10;           // máx de mídias por janela
+const BUCKET_MIDIA_JANELA = 60 * 60 * 1000; // janela de 1 hora (ms)
+
+/**
+ * Incrementa o contador de mídias do lojista.
+ * Retorna true se o limite foi EXCEDIDO, false se ainda está dentro do limite.
+ */
+export function incrementarBucketMidia(whatsapp: string): boolean {
+    const key = `bucket_midia:${whatsapp}`;
+    const entry = cache.get(key) as { count: number } | null;
+
+    if (!entry) {
+        cache.set(key, { count: 1 }, BUCKET_MIDIA_JANELA);
+        return false;
+    }
+
+    const novoCount = entry.count + 1;
+    cache.set(key, { count: novoCount }, BUCKET_MIDIA_JANELA);
+    return novoCount > BUCKET_MIDIA_LIMITE;
+}
+
+/**
+ * Retorna o tempo restante (em segundos) até o bucket resetar.
+ * Retorna 0 se não houver bucket ativo.
+ */
+export function ttlBucketMidia(whatsapp: string): number {
+    const key = `bucket_midia:${whatsapp}`;
+    const raw = (cache as any)['store'].get(key) as { expiresAt: number } | undefined;
+    if (!raw) return 0;
+    const msRestante = Math.max(0, raw.expiresAt - Date.now());
+    return Math.ceil(msRestante / 1000);
+}
