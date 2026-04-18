@@ -621,6 +621,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
     const isInteractive = msg.type === 'interactive';
     const isTextOnly    = msg.type === 'text';
+    const isMediaOnly   = ['image', 'audio', 'video', 'sticker', 'voice'].includes(msg.type);
 
     const buttonId = isInteractive
         ? (msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || '')
