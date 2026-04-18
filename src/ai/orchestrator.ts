@@ -724,25 +724,19 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                     rows: [
                         { id: 'cat_supermercado', title: 'Supermercado', description: 'Mercadinhos, Mercearias' },
                         { id: 'cat_farmacia',     title: 'Farmácia',     description: 'Drogarias' },
-                        { id: 'cat_restaurante',  title: 'Restaurante',  description: 'Almoço, Jantar' },
-                        { id: 'cat_lanchonete',   title: 'Lanchonete',   description: 'Salgados, Sucos, Açaí' },
-                        { id: 'cat_pizzaria',     title: 'Pizzaria',     description: 'Pizzas e Massas' },
+                        { id: 'cat_restaurante',  title: 'Alimentação',  description: 'Refeições, Lanches, Pizza' },
+                        { id: 'cat_padaria',      title: 'Padaria/Açougue',description: 'Pães, Carnes, Frios' },
+                        { id: 'cat_vestuario',    title: 'Moda/Calçados',description: 'Roupas, Sapatos' }
                     ]
                 },
                 {
-                    title: 'Setores',
+                    title: 'Outros Setores',
                     rows: [
-                        { id: 'cat_vestuario',    title: 'Vestuário',    description: 'Roupas, Moda' },
-                        { id: 'cat_calcados',     title: 'Calçados',     description: 'Tênis, Sapatos' },
                         { id: 'cat_construcao',   title: 'Construção',   description: 'Ferragens, Tintas' },
-                        { id: 'cat_padaria',      title: 'Padaria',      description: 'Pães, Confeitaria' },
-                        { id: 'cat_acougue',      title: 'Açougue',      description: 'Carnes, Frangos' },
                         { id: 'cat_pet',          title: 'Pet Shop',     description: 'Ração, Acessórios' },
-                        { id: 'cat_otica',        title: 'Ótica',        description: 'Óculos, Lentes' },
                         { id: 'cat_eletronicos',  title: 'Eletrônicos',  description: 'Celulares, TV, PC' },
-                        { id: 'cat_cosmeticos',   title: 'Cosméticos',   description: 'Beleza, Perfumaria' },
-                        { id: 'cat_utilidades',   title: 'Utilidades',   description: 'Variedades, Presentes' },
-                        { id: 'cat_outro',        title: 'Outro',        description: 'Outros tipos de loja' },
+                        { id: 'cat_utilidades',   title: 'Utilidades',   description: 'Cosméticos, Variedades' },
+                        { id: 'cat_outro',        title: 'Outro',        description: 'Outras opções' }
                     ]
                 }
             ];
