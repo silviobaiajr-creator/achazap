@@ -517,6 +517,7 @@ JSON:`;
                         produto_nome: maisProximo.produto_nome,
                         preco: maisProximo.preco,
                         unidade: maisProximo.unidade,
+                        atualizado_em: (maisProximo as any).atualizado_em ?? undefined,
                     };
                     alteracao.acao = maisProximo.preco === item.preco ? 'sem_alteracao' : 'preco_atualizado';
                 }
@@ -1837,6 +1838,7 @@ JSON:`;
                         produto_nome: maisProximo.produto_nome,
                         preco: maisProximo.preco,
                         unidade: maisProximo.unidade,
+                        atualizado_em: (maisProximo as any).atualizado_em ?? undefined,
                     };
                     alteracao.acao = maisProximo.preco === item.preco ? 'sem_alteracao' : 'preco_atualizado';
                 }
