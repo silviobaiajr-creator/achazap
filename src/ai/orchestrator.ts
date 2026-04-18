@@ -439,7 +439,7 @@ JSON:`;
             card += `📦 Novo cadastro`;
         } else if (item.acao === 'preco_atualizado' && item.produtoExistente) {
             const precoAntigo = `R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')} / ${item.produtoExistente.unidade}`;
-            const selo = calcularSeloFrescor(item.produtoExistente.updated_at);
+            const selo = calcularSeloFrescor(item.produtoExistente.atualizado_em);
             card += `🔄 ${num} *${nomeExibido}*\n`;
             card += `💰 ${rotuloFonte}: *${precoFoto}*\n`;
             card += `📦 Estoque: ${precoAntigo}\n`;
@@ -447,7 +447,7 @@ JSON:`;
             card += `↪️ Atualizar preço`;
         } else if (item.acao === 'sem_alteracao' && item.produtoExistente) {
             const precoEstoque = `R$ ${item.produtoExistente.preco.toFixed(2).replace('.', ',')} / ${item.produtoExistente.unidade}`;
-            const selo = calcularSeloFrescor(item.produtoExistente.updated_at);
+            const selo = calcularSeloFrescor(item.produtoExistente.atualizado_em);
             card += `⏭️ ${num} *${nomeExibido}*\n`;
             card += `💰 ${rotuloFonte}: *${precoFoto}*\n`;
             card += `📦 Estoque: ${precoEstoque}\n`;
@@ -1952,7 +1952,7 @@ async function buscarProdutosSimilares(
     if (candidatos.length === 0) {
         const { data, error } = await supabase
             .from('catalogo_ativo')
-            .select('id, produto_nome, preco, unidade, updated_at')
+            .select('id, produto_nome, preco, unidade, atualizado_em')
             .eq('loja_id', lojaId)
             .eq('disponivel', true);
 
@@ -2013,7 +2013,7 @@ async function ingeriCatalogo(lojaId: string, produto: DadosProduto, fonte: stri
         logger.info({ lojaId, nome: nomeSeguro }, '[Ledger] Renovando selo de frescor (preço igual)');
         await supabase
             .from('catalogo_ativo')
-            .update({ updated_at: new Date().toISOString() })
+            .update({ atualizado_em: new Date().toISOString() })
             .eq('id', ativo.id);
         return { inserido: false };
     }
@@ -2029,7 +2029,7 @@ async function ingeriCatalogo(lojaId: string, produto: DadosProduto, fonte: stri
                 unidade:        unidadeSegura,
                 disponivel:     true,
                 fonte_ingestao: fonte,
-                updated_at:     new Date().toISOString(),
+                atualizado_em:  new Date().toISOString(),
             },
             { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
         )
@@ -2088,16 +2088,15 @@ async function atualizarPrecoLedger(lojaId: string, produtoNome: string, novoPre
                 disponivel:     true,
                 fonte_ingestao: 'manual',
                 atualizado_em:  agora,
-                updated_at:     agora,
             },
             { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
         )
         .select('id')
         .single();
 
-    if (erro1?.code === 'PGRST204') {
-        // Schema cache ainda desatualizado — fallback sem updated_at
-        logger.warn({ lojaId }, '[Ledger] PGRST204: updated_at não reconhecido, usando fallback atualizado_em');
+    if (erro1?.code === 'PGRST204' || erro1?.code === '42703') {
+        // Schema cache desatualizado ou coluna não reconhecida — fallback defensivo
+        logger.warn({ lojaId, erro1 }, '[Ledger] Erro no upsert, tentando fallback com atualizado_em puro');
         const { data: tentativa2, error: erro2 } = await supabase
             .from('catalogo_ativo')
             .upsert(
@@ -2225,18 +2224,18 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
     const [{ data: semData }, { data: comData }] = await Promise.all([
         supabase
             .from('catalogo_ativo')
-            .select('produto_nome, preco, unidade, updated_at')
+            .select('produto_nome, preco, unidade, atualizado_em')
             .eq('loja_id', loja.id)
             .eq('disponivel', true)
-            .is('updated_at', null)
+            .is('atualizado_em', null)
             .limit(10),
         supabase
             .from('catalogo_ativo')
-            .select('produto_nome, preco, unidade, updated_at')
+            .select('produto_nome, preco, unidade, atualizado_em')
             .eq('loja_id', loja.id)
             .eq('disponivel', true)
-            .not('updated_at', 'is', null)
-            .order('updated_at', { ascending: true })
+            .not('atualizado_em', 'is', null)
+            .order('atualizado_em', { ascending: true })
             .limit(10),
     ]);
 
@@ -2244,8 +2243,8 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
     
     // Filtro inteligente: Só mostra o que realmente PRECISA de revisão (6 dias ou mais, ou NULL)
     const pendentes = todos.filter(item => {
-        if (!item.updated_at) return true;
-        const data = new Date(item.updated_at);
+        if (!item.atualizado_em) return true;
+        const data = new Date(item.atualizado_em);
         const agora = new Date();
         const diffDias = Math.floor((agora.getTime() - data.getTime()) / (1000 * 60 * 60 * 24));
         return diffDias >= 6;
@@ -2262,7 +2261,7 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
     const alteracoes: AlteracaoPlanejada[] = [];
 
     pendentes.forEach((item, i) => {
-        const selo = calcularSeloFrescor(item.updated_at);
+        const selo = calcularSeloFrescor(item.atualizado_em);
         relatorio += `*${i+1}. ${item.produto_nome}*\n💰 R$ ${Number(item.preco).toFixed(2).replace('.', ',')} / ${item.unidade} ${selo}\n`;
         alteracoes.push({
             nome: item.produto_nome,

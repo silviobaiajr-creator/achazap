@@ -20,8 +20,8 @@ export async function startValidityWorker() {
                 .from('catalogo_ativo')
                 .select('loja_id, produto_nome')
                 .eq('disponivel', true)
-                .lt('updated_at', seisDiasAtras)
-                .gte('updated_at', seteDiasAtras);
+                .lt('atualizado_em', seisDiasAtras)
+                .gte('atualizado_em', seteDiasAtras);
 
             if (errItens) {
                 logger.error({ errItens }, '[ValidityWorker] Erro ao buscar itens');
