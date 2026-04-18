@@ -2028,7 +2028,20 @@ async function buscarProdutosSimilares(
     try {
         const result = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: `O Lojista buscou o produto: "${termoBusca}".\nEncontre TODOS os que forem o mesmo produto no catálogo abaixo.\nATENÇÃO: Considere GRAVES erros ortográficos/fonéticos que usuários de WhatsApp cometem (ex: "Aros" querendo dizer "Arroz", "Massa" = "Macarrão", "Mussa" = "Muçarela"), além de sinônimos e variações de acento/marca.\nRetorne APENAS um array JSON de índices (começando em 1). Ex: [3, 1]. Se for um objeto de categoria completamente diferente e sem semelhança fonética, não inclua.\n\nCatálogo:\n${catalogList}\n\nJSON:`,
+            contents: `Você é um analista estrito de similaridade de produtos.
+Produto buscado: "${termoBusca}"
+
+Encontre na lista abaixo quais itens são o MESMO PRODUTO que o buscado.
+- Considere erros ortográficos comuns em WhatsApp (ex: "Aros" e "Arroz", "Mussa" e "Muçarela").
+- Considere sinônimos ou abreviações CLARAS (ex: "Refri" e "Refrigerante", "Massa" e "Macarrão").
+- CUIDADO: Falsos positivos são intoleráveis. Se o produto for de tipo diferente (ex: "Colher" e "Molho", "Café" e "Leite"), NÃO TEM SIMILARIDADE. Somente retorne se for comprovadamente a mesma mercadoria.
+- Retorne APENAS um array JSON de índices (começando em 1) com as correspondências encontradas.
+- Se não houver NENHUM correspondente seguro, retorne um array vazio: []
+
+Catálogo:
+${catalogList}
+
+JSON:`,
             config: { responseMimeType: 'application/json' },
         });
         logTokens('buscar_similares_gemini', lojaId, lojaId, result.usageMetadata);
