@@ -619,24 +619,39 @@ async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: 
 export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     const from = msg.from;
 
+    const isInteractive = msg.type === 'interactive';
+    const isTextOnly    = msg.type === 'text';
+
+    const buttonId = isInteractive
+        ? (msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || '')
+        : '';
+
+    const userText = msg.text?.body?.trim() || 
+                    (isInteractive ? (msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '') : '') ||
+                    '';
+
     try {
         let loja = await buscarPerfilLoja(from);
-    let contexto = await lerContexto(from) as ContextoSessao | null;
+        let contexto = await lerContexto(from) as ContextoSessao | null;
 
-    // ══════════════════════════════════════════════════════════
-    // DISPATCHER DE PERSONA (Onboarding) - Sprint Auditoria
-    // ══════════════════════════════════════════════════════════
-    if (!loja) {
-        const isInteractive = msg.type === 'interactive';
-        const buttonId = isInteractive
-            ? (msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || '')
-            : '';
-        const userText = msg.text?.body?.trim() || '';
+        // ══════════════════════════════════════════════════════════
+        // MIDDLEWARE GLOBAL DE FUGA (Sprint 6) — antes de tudo
+        // ══════════════════════════════════════════════════════════
+        const fugou = await verificarFugaGlobal(msg, buttonId, userText, contexto, from, loja);
+        if (fugou) return;
+        // Reler contexto após fuga (contexto pode ter sido limpo)
+        contexto = await lerContexto(from) as ContextoSessao | null;
+
+        // ══════════════════════════════════════════════════════════
+        // DISPATCHER DE PERSONA (Onboarding) - Sprint Auditoria
+        // ══════════════════════════════════════════════════════════
+        if (!loja) {
 
         // Se não há contexto, inicia boas vindas
         if (!contexto || (contexto.estado !== EstadosFluxo.ONBOARDING_PERFIL && 
                          contexto.estado !== EstadosFluxo.ONBOARDING_NOME && 
-                         contexto.estado !== EstadosFluxo.ONBOARDING_LOCALIZACAO)) {
+                         contexto.estado !== EstadosFluxo.ONBOARDING_LOCALIZACAO &&
+                         contexto.estado !== EstadosFluxo.ONBOARDING_CATEGORIA)) {
             
             logger.info({ from }, '[Onboarding] Novo número detectado. Iniciando dispatcher.');
             await salvarContexto(from, { estado: EstadosFluxo.ONBOARDING_PERFIL });
@@ -694,7 +709,56 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             }
 
             const [cidade, bairro] = extraidos;
-            const estado = detectarEstadoPorWhatsApp(from) || 'PA'; // Fallback PA conforme req anterior
+            const estado = detectarEstadoPorWhatsApp(from) || 'PA';
+
+            await salvarContexto(from, { 
+                ...contexto, 
+                estado: EstadosFluxo.ONBOARDING_CATEGORIA,
+                dadosLojista: { ...contexto.dadosLojista, cidade, bairro, estado }
+            });
+
+            const CATEGORIAS_MENU = [
+                {
+                    title: 'Mais Comuns',
+                    rows: [
+                        { id: 'cat_supermercado', title: 'Supermercado', description: 'Mercadinhos, Mercearias' },
+                        { id: 'cat_farmacia',     title: 'Farmácia',     description: 'Drogarias' },
+                        { id: 'cat_restaurante',  title: 'Restaurante',  description: 'Almoço, Jantar' },
+                        { id: 'cat_lanchonete',   title: 'Lanchonete',   description: 'Salgados, Sucos, Açaí' },
+                        { id: 'cat_pizzaria',     title: 'Pizzaria',     description: 'Pizzas e Massas' },
+                    ]
+                },
+                {
+                    title: 'Setores',
+                    rows: [
+                        { id: 'cat_vestuario',    title: 'Vestuário',    description: 'Roupas, Moda' },
+                        { id: 'cat_calcados',     title: 'Calçados',     description: 'Tênis, Sapatos' },
+                        { id: 'cat_construcao',   title: 'Construção',   description: 'Ferragens, Tintas' },
+                        { id: 'cat_padaria',      title: 'Padaria',      description: 'Pães, Confeitaria' },
+                        { id: 'cat_acougue',      title: 'Açougue',      description: 'Carnes, Frangos' },
+                        { id: 'cat_pet',          title: 'Pet Shop',     description: 'Ração, Acessórios' },
+                        { id: 'cat_otica',        title: 'Ótica',        description: 'Óculos, Lentes' },
+                        { id: 'cat_eletronicos',  title: 'Eletrônicos',  description: 'Celulares, TV, PC' },
+                        { id: 'cat_cosmeticos',   title: 'Cosméticos',   description: 'Beleza, Perfumaria' },
+                        { id: 'cat_utilidades',   title: 'Utilidades',   description: 'Variedades, Presentes' },
+                        { id: 'cat_outro',        title: 'Outro',        description: 'Outros tipos de loja' },
+                    ]
+                }
+            ];
+
+            await sendListMessage(from, 'Show! Para finalizar, qual a *Categoria* da sua loja?', 'Escolha a categoria', CATEGORIAS_MENU);
+            return;
+        }
+
+        // Fluxo: Categoria da Loja
+        if (contexto.estado === EstadosFluxo.ONBOARDING_CATEGORIA) {
+            const categoriaKey = buttonId.startsWith('cat_') ? buttonId.replace('cat_', '') : '';
+            
+            if (!categoriaKey) {
+                // Se o lojista digitou texto em vez de clicar na lista, tenta um fuzzy ou pede denovo
+                await sendTextMessage(from, 'Por favor, selecione uma categoria da lista para continuarmos.');
+                return;
+            }
 
             try {
                 const { data: novaLoja, error } = await supabase
@@ -702,43 +766,32 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                     .insert({
                         whatsapp: from.startsWith('+') ? from : '+' + from,
                         nome: contexto.dadosLojista?.nome,
-                        cidade: cidade,
-                        bairro: bairro,
-                        estado: estado,
+                        cidade: contexto.dadosLojista?.cidade,
+                        bairro: contexto.dadosLojista?.bairro,
+                        estado: contexto.dadosLojista?.estado,
+                        categoria: categoriaKey,
                         ativa: true,
-                        saldo_cliques: 100 // Crédito inicial de boas-vindas
+                        saldo_cliques: 100
                     })
                     .select()
                     .single();
 
                 if (error) throw error;
 
-                await sendTextMessage(from, `🎉 Tudo pronto, *${contexto.dadosLojista?.nome}*!\n\nSua loja foi cadastrada em *${cidade}/${bairro}*.\nVocê ganhou 100 cliques de bônus para começar!`);
+                await sendTextMessage(from, `🎉 Tudo pronto, *${contexto.dadosLojista?.nome}*!\n\nSua loja foi cadastrada como *${categoriaKey.toUpperCase()}* em *${contexto.dadosLojista?.cidade}*.\nVocê ganhou 100 cliques de bônus para começar!`);
                 await delay(500);
                 await limparContexto(from);
                 
-                // Recarrega a loja para o fluxo seguir normalmente
                 loja = novaLoja;
-                // Deixa o código seguir para o envio do Menu Principal abaixo
             } catch (err) {
                 logger.error({ err }, '[Onboarding] Erro ao salvar loja');
-                await sendTextMessage(from, 'Vish, tive um probleminha técnico ao salvar sua loja. Pode tentar digitar a Cidade e Bairro novamente?');
+                await sendTextMessage(from, 'Vish, tive um probleminha técnico ao salvar sua loja. Pode tentar selecionar a Categoria novamente?');
                 return;
             }
         }
     }
 
-    const isMediaOnly   = ['image', 'audio', 'video', 'sticker', 'voice'].includes(msg.type);
-    const isInteractive = msg.type === 'interactive';
-    const isTextOnly    = msg.type === 'text';
-
-    const buttonId = isInteractive
-        ? (msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || '')
-        : '';
-
-    const userMessageText = msg.text?.body ||
-        (isInteractive ? (msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '') : '') ||
-        '';
+    const userMessageText = userText;
 
     logger.debug({ from, estado: contexto?.estado ?? 'IDLE', tipo: msg.type, texto: userMessageText || '[media]' }, '[processMessage]');
 
@@ -774,14 +827,6 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         );
         return;
     }
-
-    // ══════════════════════════════════════════════════════════
-    // MIDDLEWARE GLOBAL DE FUGA (Sprint 6) — antes de tudo
-    // ══════════════════════════════════════════════════════════
-    const fugou = await verificarFugaGlobal(msg, buttonId, userMessageText, contexto, from, loja);
-    if (fugou) return;
-    // Reler contexto após fuga (contexto pode ter sido limpo)
-    contexto = await lerContexto(from) as ContextoSessao | null;
 
     // ══════════════════════════════════════════════════════════
     // INTERCEPTADOR GLOBAL: Comandos especiais (qualquer estado)

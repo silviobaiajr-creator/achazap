@@ -15,6 +15,7 @@ export enum EstadosFluxo {
     ONBOARDING_PERFIL = 'ONBOARDING_PERFIL',
     ONBOARDING_NOME = 'ONBOARDING_NOME',
     ONBOARDING_LOCALIZACAO = 'ONBOARDING_LOCALIZACAO',
+    ONBOARDING_CATEGORIA = 'ONBOARDING_CATEGORIA',
     AGUARDANDO_SELECAO_REVISAO = 'AGUARDANDO_SELECAO_REVISAO',
 }
 
@@ -61,6 +62,7 @@ export interface ContextoSessao {
         cidade?: string;
         bairro?: string;
         estado?: string;
+        categoria?: string;
     };
     acao?: string;
     perguntaPendente?: string;
