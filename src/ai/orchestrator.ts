@@ -6,6 +6,7 @@ import {
     sendInteractiveButtons,
     sendListMessage,
     sendCTAUrlMessage,
+    sendReaction,
     type WhatsAppMessage,
 } from '../lib/whatsapp.js';
 import {
@@ -214,11 +215,7 @@ async function processarDadosProduto(from: string, loja: any, userMessageText: s
     const dadosExistentes = contexto.dadosProduto;
     const retries = contexto.retries ?? 0;
 
-    // Sprint 2 #1: feedback imediato UX
-    try {
-        // Substitui a reaction pelo próprio sistema nativo quando aplicável ou ignora
-        // await redis.call('sendReaction', from, '🔍').catch(() => {});  // best-effort
-    } catch { /* ignora se API não suportar */ }
+    // Armadilha 1: é disparada no call site (processMessage) onde msg está disponível
 
     const avisoContexto = contexto.perguntaPendente 
         ? `Atenção: o usuário está respondendo à pergunta "${contexto.perguntaPendente}". Ele pode ter digitado APENAS o preço (ex: "5.00"), APENAS a unidade, ou o nome. Extraia o dado e NÃO marque como ruído!` 
@@ -252,11 +249,15 @@ JSON:`;
         });
 
         const rawText = result.text || '{}';
+        // Armadilha 12: Sanitização de Vírgula Brasileira
+        // Converte preços com vírgula (ex: 15,90) para ponto (15.90) dentro do JSON
+        // ANTES de passar pelo Zod, evitando rejeição de tipo em respostas numéricas.
+        const rawTextSanitizado = rawText.replace(/"preco"\s*:\s*([\d]+),([\d]+)/g, '"preco": $1.$2');
         logTokens('extrair_produto', from, loja?.id ?? 'unknown', result.usageMetadata);
-        logger.debug({ from, rawText }, '[Gemini] extração produto');
+        logger.debug({ from, rawTextSanitizado }, '[Gemini] extração produto');
 
         // Tenta extrair múltiplos produtos primeiro
-        const dadosMulti = parseSafe(MultiProdutosTextoSchema, rawText, {
+        const dadosMulti = parseSafe(MultiProdutosTextoSchema, rawTextSanitizado, {
             ruido_detectado: false,
             itens: []
         });
@@ -273,7 +274,7 @@ JSON:`;
             return;
         }
 
-        const dados = parseSafe(ProdutoExtraidoSchema, rawText, {
+        const dados = parseSafe(ProdutoExtraidoSchema, rawTextSanitizado, {
             incompleto: false,
             ruido_detectado: false,
             nome: null,
@@ -385,6 +386,24 @@ JSON:`;
         }
 
         logger.debug({ from, produto }, '[Debug] Produto extraído');
+
+        // Armadilha 11: Detector de Embalagem Coletiva sem Quantidade
+        // Palavras que indicam fardo/pacote sem especificar a quantidade interna
+        const TERMOS_EMBALAGEM = /\b(fardo|caixa|bandeja|pack|pacot[eo]|cesta|kit|combo|leve\s*\d)\b/i;
+        const TEM_QUANTIDADE_INTERNA = /\b(\d+\s*(un|und|unidade|lata|lat|garraf|g|ml|kg|pç|peca|peça)s?)\b/i;
+
+        if (TERMOS_EMBALAGEM.test(produto.nome) && !TEM_QUANTIDADE_INTERNA.test(produto.nome) && !TEM_QUANTIDADE_INTERNA.test(userMessageText)) {
+            // Guarda o produto no contexto e pergunta a quantidade
+            await salvarContexto(from, {
+                ...contexto,
+                estado: EstadosFluxo.AGUARDANDO_QUANTIDADE_EMBALAGEM,
+                dadosProduto: produto,
+                perguntaPendente: 'Quantas unidades tem nessa embalagem?'
+            });
+            await sendTextMessage(from,
+                `Para seu cliente saber se vale a pena, me diz: o preço de *R$ ${produto.preco.toFixed(2).replace('.', ',')}* do *${produto.nome}* é para *quantas unidades*?\n\nEx: _"24 latas"_, _"12 unidades"_, _"6 garrafas"_`);
+            return;
+        }
 
         // Busca similares (peneira) e continua o fluxo
         await avançarParaSimilaresOuSalvar(from, loja, contexto, produto);
@@ -892,7 +911,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     // ══════════════════════════════════════════════════════════
     // ESCUDO GLOBAL ANTI-SPAM DE MÍDIA
     // ══════════════════════════════════════════════════════════
-    if (isMediaOnly && contexto && contexto.estado !== EstadosFluxo.IDLE && contexto.estado !== EstadosFluxo.AGUARDANDO_DADOS_PRODUTO) {
+    if (isMediaOnly && contexto && contexto.estado !== EstadosFluxo.IDLE && contexto.estado !== EstadosFluxo.AGUARDANDO_DADOS_PRODUTO && contexto.estado !== EstadosFluxo.AGUARDANDO_QUANTIDADE_EMBALAGEM) {
         logger.warn({ from, estado: contexto.estado }, '[Proteção] Mídia em estado não-esperado bloqueada');
         
         if (!temAvisoSpam(from)) {
@@ -909,12 +928,37 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     }
 
     // ══════════════════════════════════════════════════════════
+    // ARMADILHA 11: Handler de Embalagem Coletiva sem Quantidade
+    // O lojista respondeu "24 latas" após a pergunta de quantidade
+    // ══════════════════════════════════════════════════════════
+    if (contexto?.estado === EstadosFluxo.AGUARDANDO_QUANTIDADE_EMBALAGEM && isTextOnly && userMessageText) {
+        const produtoBase = contexto.dadosProduto;
+        if (produtoBase?.nome && produtoBase?.preco) {
+            const quantidadeTrimada = userMessageText.trim().substring(0, 30);
+            const produtoEnriquecido = {
+                nome: `${produtoBase.nome} (${quantidadeTrimada})`.substring(0, 250),
+                preco: produtoBase.preco as number,
+                unidade: (produtoBase.unidade || 'un') as string,
+            };
+            const ctxNormal = { ...contexto, estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO };
+            await salvarContexto(from, ctxNormal);
+            await avançarParaSimilaresOuSalvar(from, loja, ctxNormal, produtoEnriquecido);
+            return;
+        }
+        await limparContexto(from);
+        await sendTextMessage(from, '😕 Não consegui recuperar o produto anterior. Por favor, envie novamente com a quantidade inclusa.');
+        await enviarMenu(loja.nome, from);
+        return;
+    }
+
+    // ══════════════════════════════════════════════════════════
     // INTERCEPTADOR GLOBAL: Comandos especiais (qualquer estado)
     // ══════════════════════════════════════════════════════════
     if (isTextOnly && userMessageText.toLowerCase().trim().startsWith('/revisar')) {
         await processarRevisaoPrecos(from, loja);
         return;
     }
+
 
     // ══════════════════════════════════════════════════════════
     // BOTÕES DE NAVEGAÇÃO DO MENU (aceitos mesmo em IDLE)
@@ -1943,6 +1987,10 @@ async function processarMidia(msg: WhatsAppMessage, from: string, loja: any, con
         await sendTextMessage(from, 'Não consegui processar esse tipo de arquivo. Por favor, *digite* os dados do produto.');
         return;
     }
+
+    // Armadilha 1: Reação de emoji instantânea — confirma ao lojista que a mídia chegou
+    // Fire-and-forget: nunca bloqueia o processamento principal
+    if (msg.id) sendReaction(from, msg.id, '🔍').catch(() => {});
 
     // Sprint 11 #1: validar mime-type
     const mimeType: string = mediaInfo.mime_type ?? '';

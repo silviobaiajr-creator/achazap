@@ -9,6 +9,36 @@ import { cache } from './redis-cloud.js';
 import { enviarLogAuditoria } from './audit.js';
 
 /**
+ * Armadilha 1: Reação de Emoji para feedback instantâneo.
+ * Envia uma reação de emoji a uma mensagem específica (pelo wamid).
+ * O lojista vê o emoji em < 1s, antes mesmo do bot processar a resposta.
+ * Best-effort: falhas são ignoradas para não travar o fluxo.
+ */
+export async function sendReaction(to: string, wamid: string, emoji: string): Promise<void> {
+    if (ACCESS_TOKEN.startsWith('EAAxxxxx') || !ACCESS_TOKEN) {
+        console.log(`📱 [SIMULADOR REACTION] ${emoji} → mensagem ${wamid.substring(0, 20)}...`);
+        return;
+    }
+    try {
+        await axios.post(
+            `${BASE_URL}/${PHONE_NUMBER_ID}/messages`,
+            {
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to,
+                type: 'reaction',
+                reaction: { message_id: wamid, emoji },
+            },
+            { headers: { Authorization: `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+        );
+    } catch {
+        // best-effort: reaction é cosmética, nunca pode travar o fluxo principal
+    }
+}
+
+
+
+/**
  * Envia uma mensagem de texto simples para um número WhatsApp.
  */
 export async function sendTextMessage(to: string, text: string): Promise<void> {
@@ -287,6 +317,7 @@ export async function downloadMedia(mediaId: string): Promise<Buffer> {
  * Tipos de mensagem que o webhook pode receber (cobertura completa da Meta API).
  */
 export type WhatsAppMessage = {
+    id?: string;  // wamid (message_id) — used for reactions
     from: string;
     type: 'text' | 'image' | 'audio' | 'video' | 'document' |
           'interactive' | 'sticker' | 'location' | 'contacts' | 'reaction' | 'voice';
@@ -350,6 +381,7 @@ export function extractMessage(body: unknown): WhatsAppMessage | null {
         if (!msg.from || typeof msg.from !== 'string') return null;
 
         return {
+            id: msg.id as string | undefined,
             from: msg.from as string,
             type: msg.type as WhatsAppMessage['type'],
             text: msg.text as WhatsAppMessage['text'],
