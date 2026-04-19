@@ -132,7 +132,7 @@ export function ttlBucketMidia(whatsapp: string): number {
 // ============================================================
 
 export function temAvisoSpam(whatsapp: string): boolean {
-    return cache.get(`aviso_spam_midia:${whatsapp}`) !== undefined;
+    return cache.get(`aviso_spam_midia:${whatsapp}`) !== null;
 }
 
 export function setAvisoSpam(whatsapp: string, ttlSegundos: number): void {
