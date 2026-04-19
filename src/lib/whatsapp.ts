@@ -268,10 +268,11 @@ export async function downloadMedia(mediaId: string): Promise<Buffer> {
 export type WhatsAppMessage = {
     from: string;
     type: 'text' | 'image' | 'audio' | 'video' | 'document' |
-          'interactive' | 'sticker' | 'location' | 'contacts' | 'reaction';
+          'interactive' | 'sticker' | 'location' | 'contacts' | 'reaction' | 'voice';
     text?:        { body: string };
     image?:       { id: string; mime_type: string; file_size?: number; caption?: string };
     audio?:       { id: string; mime_type: string; file_size?: number };
+    voice?:       { id: string; mime_type: string; file_size?: number };
     video?:       { id: string; mime_type: string; file_size?: number };
     document?:    { id: string; filename: string; mime_type: string };
     sticker?:     { id: string; mime_type: string };
@@ -289,7 +290,7 @@ export type WhatsAppMessage = {
 // Tipos de mensagens que o bot aceita processar. Qualquer coisa fora disso é descartada.
 const TIPOS_ACEITOS = new Set<string>([
     'text', 'image', 'audio', 'video', 'document', 'interactive', 'sticker',
-    'location', 'contacts', 'reaction',
+    'location', 'contacts', 'reaction', 'voice'
 ]);
 
 /**
@@ -333,6 +334,7 @@ export function extractMessage(body: unknown): WhatsAppMessage | null {
             text: msg.text as WhatsAppMessage['text'],
             image: msg.image as WhatsAppMessage['image'],
             audio: msg.audio as WhatsAppMessage['audio'],
+            voice: msg.voice as WhatsAppMessage['voice'],
             document: msg.document as WhatsAppMessage['document'],
             sticker: msg.sticker as WhatsAppMessage['sticker'],
             interactive: msg.interactive as WhatsAppMessage['interactive'],

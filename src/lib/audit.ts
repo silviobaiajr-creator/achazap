@@ -21,6 +21,7 @@ export function enviarLogAuditoria(args: {
         contexto: args.contexto,
         mensagem: args.mensagem,
         dados:    args.dados ?? null,
+        created_at: new Date().toISOString()
     }]).then(({ error }) => {
         if (error) console.warn('[Audit] Falha ao salvar log_dev:', error.message);
     });

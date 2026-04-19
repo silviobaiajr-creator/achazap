@@ -7,6 +7,7 @@ import { supabaseAdmin as supabase } from './lib/supabase.js';
 import { verificarConexao, marcarWamidProcessado } from './lib/redis-cloud.js';
 import { messageQueue } from './queue/messageQueue.js';
 import { logger } from './lib/logger.js';
+import { enviarLogAuditoria } from './lib/audit.js';
 
 const VERIFY_TOKEN  = process.env.WHATSAPP_VERIFY_TOKEN!;
 const APP_SECRET    = process.env.WHATSAPP_APP_SECRET;
@@ -135,6 +136,15 @@ export function buildServer() {
 
                 // ── CAMADA 5: Enfileirar via BullMQ (3.1 — persistência e retry) ──
                 logger.info({ from: msg.from, type: msg.type, wamid }, '[Webhook] Mensagem enfileirada');
+
+                enviarLogAuditoria({
+                    whatsapp: msg.from,
+                    nivel: 'info',
+                    contexto: 'WEBHOOK',
+                    mensagem: `[Webhook] Mensagem Recebida e Enfileirada — Tipo: ${msg.type}`,
+                    dados: { type: msg.type, wamid }
+                });
+
                 await messageQueue.add('process', msg, {
                     jobId:   wamid || `${msg.from}_${msg.timestamp}`,  // idempotência no BullMQ também
                     attempts: 2,
