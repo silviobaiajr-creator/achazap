@@ -2,6 +2,7 @@ import { logger } from './logger.js';
 import { supabaseAdmin } from './supabase.js';
 import { enviarAlertaDono } from './whatsapp.js';
 import { env } from '../config.js';
+export { enviarLogAuditoria } from './audit.js';
 
 /**
  * Função central para logar erros críticos.
@@ -41,27 +42,3 @@ export async function logErroCritico(args: {
     await enviarAlertaDono(mensagem, `*Origem:* ${origem}${whatsapp ? `\n*Lojista:* ${whatsapp}` : ''}`);
 }
 
-/**
- * Grava um evento de fluxo no Supabase exclusivamente se o número for o Owner.
- * Fire & Forget: não bloqueia a thread principal. Zero impacto na produção real.
- */
-export function enviarLogAuditoria(args: {
-    whatsapp: string;
-    nivel: 'info' | 'warn' | 'error';
-    contexto: string;
-    mensagem: string;
-    dados?: Record<string, unknown>;
-}) {
-    const ownerNumber = env.ACHAZAP_OWNER_NUMBER;
-    if (!ownerNumber || args.whatsapp !== ownerNumber) return;  // Ignora usuários reais
-
-    supabaseAdmin.from('logs_dev').insert([{
-        whatsapp: args.whatsapp,
-        nivel:    args.nivel,
-        contexto: args.contexto,
-        mensagem: args.mensagem,
-        dados:    args.dados ?? null,
-    }]).then(({ error }) => {
-        if (error) logger.warn({ error }, '⚠️ Falha ao salvar log_dev no Supabase');
-    });
-}

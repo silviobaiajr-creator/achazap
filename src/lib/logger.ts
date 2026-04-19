@@ -4,7 +4,7 @@
  * nível e contexto, rastreáveis em produção.
  */
 import pino from 'pino';
-import { enviarLogAuditoria } from './monitor.js';
+import { enviarLogAuditoria } from './audit.js';
 
 export const logger = pino({
     level: process.env.LOG_LEVEL ?? 'info',
