@@ -1066,7 +1066,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             const obteuLock = await adquirirLock(lockKey, 120); // TTL 2 minutos
             if (!obteuLock) {
                 const msgLock = msg.type === 'image'
-                    ? '⏳ Ainda estou analisando sua última foto! Assim que terminar, me mande a próxima. 📷'
+                    ? '⏳ Ainda estou analisando sua última foto! 📷\n\n💡 *Dica:* Se você tem vários produtos, sabia que pode mandar uma *única foto* do cardápio todo de uma vez só? Eu leio tudo!'
                     : '⏳ Ainda estou ouvindo seu último áudio! Assim que terminar, pode mandar o próximo. 🎙️';
                 await sendTextMessage(from, msgLock);
                 return;
@@ -1913,7 +1913,7 @@ async function processarMidia(msg: WhatsAppMessage, from: string, loja: any, con
     }
 
     try {
-        await sendTextMessage(from, '👀 Recebi sua mídia! Me dê uns segundinhos enquanto leio os dados...');
+        await sendTextMessage(from, '👀 Recebi sua mídia! Me dê uns segundinhos enquanto leio os dados...\n\n💡 *Dica:* sabia que eu consigo ler dezenas de produtos numa *única foto* do seu cardápio de uma vez?');
         
         // Sprint 11 #2: download para Buffer (RAM), nunca disco
         const buffer = await downloadMedia(mediaInfo.id);
