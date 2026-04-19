@@ -850,12 +850,12 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         logger.warn({ from, estado: contexto.estado }, '[Proteção] Mídia em estado não-esperado bloqueada');
         
         if (!temAvisoSpam(from)) {
-            setAvisoSpam(from, 60);
+            setAvisoSpam(from, 10);
             await sendTextMessage(from, '⚠️ Calma aí! Finalize a etapa pendente acima antes de enviar novas fotos ou áudios (clique no botão ou digite a opção solicitada).\n\n💡 *Dica:* Se você tem vários produtos, sabia que pode mandar uma *única foto* do cardápio todo de uma vez só? Eu leio tudo!');
         } else {
             // Renova o tempo de silêncio a cada mídia bloqueada para garantir 
             // que uma rajada longa no pg-boss não gere múltiplos avisos.
-            setAvisoSpam(from, 60);
+            setAvisoSpam(from, 10);
         }
         
         await renovarTTLContexto(from);
