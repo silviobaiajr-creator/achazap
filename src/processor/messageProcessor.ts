@@ -3,6 +3,7 @@ import type { WhatsAppMessage } from '../lib/whatsapp.js';
 import { logger } from '../lib/logger.js';
 import { boss } from '../queue/pgBossClient.js';
 import { logErroCritico } from '../lib/monitor.js';
+import { enviarLogAuditoria } from '../lib/audit.js';
 
 /**
  * Inicializador da rotina que desempilha mensagens do banco.
@@ -28,7 +29,26 @@ export async function startMessageWorker() {
             const msgId = job.id;
             
             logger.info({ jobId: msgId, from: message.from, type: message.type }, '[Processor] Iniciando job (pg-boss)');
+
+            // Grampo de Auditoria — registra no Supabase se for o Owner
+            enviarLogAuditoria({
+                whatsapp: message.from,
+                nivel: 'info',
+                contexto: 'PROCESSOR',
+                mensagem: `[Processor] Job iniciado — tipo: ${message.type}`,
+                dados: { jobId: msgId, type: message.type }
+            });
+
             await processMessage(message);
+
+            // Registra conclusão bem-sucedida
+            enviarLogAuditoria({
+                whatsapp: message.from,
+                nivel: 'info',
+                contexto: 'PROCESSOR',
+                mensagem: '[Processor] Job processado com sucesso',
+                dados: { jobId: msgId }
+            });
         } catch (err: any) {
             // Isolamento total da Stack: previne "Cannot read properties" ocultos fora do try
             await logErroCritico({
