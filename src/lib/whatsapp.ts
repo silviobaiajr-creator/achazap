@@ -6,6 +6,7 @@ const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN!;
 
 import { env } from '../config.js';
 import { cache } from './redis-cloud.js';
+import { enviarLogAuditoria } from './audit.js';
 
 /**
  * Envia uma mensagem de texto simples para um número WhatsApp.
@@ -16,6 +17,14 @@ export async function sendTextMessage(to: string, text: string): Promise<void> {
         console.log(`\x1b[36m${text}\x1b[0m\n`);
         return;
     }
+
+    enviarLogAuditoria({
+        whatsapp: to,
+        nivel: 'info',
+        contexto: 'BOT_OUTPUT',
+        mensagem: `🤖 [Texto] "${text.substring(0, 100).replace(/\n/g, ' ')}..."`,
+        dados: { type: 'text', text }
+    });
 
     const MAX_TENTATIVAS = 3;
     for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
@@ -101,6 +110,14 @@ export async function sendInteractiveButtons(to: string, bodyText: string, butto
         return;
     }
 
+    enviarLogAuditoria({
+        whatsapp: to,
+        nivel: 'info',
+        contexto: 'BOT_OUTPUT',
+        mensagem: `🤖 [Botões] "${bodyText.substring(0, 80).replace(/\n/g, ' ')}..." | Opções: ${buttons.map(b => b.title).join(', ')}`,
+        dados: { type: 'interactive_buttons', bodyText, buttons }
+    });
+
     try {
         await axios.post(
             `${BASE_URL}/${PHONE_NUMBER_ID}/messages`,
@@ -136,6 +153,14 @@ export async function sendListMessage(to: string, bodyText: string, buttonLabel:
         console.log(`\n📱 [SIMULADOR LISTA] Enviado para ${to}: ${bodyText}`);
         return;
     }
+
+    enviarLogAuditoria({
+        whatsapp: to,
+        nivel: 'info',
+        contexto: 'BOT_OUTPUT',
+        mensagem: `🤖 [Lista] "${bodyText.substring(0, 80).replace(/\n/g, ' ')}..."`,
+        dados: { type: 'interactive_list', bodyText }
+    });
 
     try {
         await axios.post(
