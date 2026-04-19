@@ -1,6 +1,7 @@
 import { logger } from './logger.js';
 import { supabaseAdmin } from './supabase.js';
 import { enviarAlertaDono } from './whatsapp.js';
+import { env } from '../config.js';
 
 /**
  * Função central para logar erros críticos.
@@ -51,7 +52,7 @@ export function enviarLogAuditoria(args: {
     mensagem: string;
     dados?: Record<string, unknown>;
 }) {
-    const ownerNumber = process.env.ACHAZAP_OWNER_NUMBER;
+    const ownerNumber = env.ACHAZAP_OWNER_NUMBER;
     if (!ownerNumber || args.whatsapp !== ownerNumber) return;  // Ignora usuários reais
 
     supabaseAdmin.from('logs_dev').insert([{
