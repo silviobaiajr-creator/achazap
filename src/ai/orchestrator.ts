@@ -18,6 +18,8 @@ import {
     cache,
     incrementarBucketMidia,
     ttlBucketMidia,
+    temAvisoSpam,
+    setAvisoSpam,
 } from '../lib/redis-cloud.js';
 import { supabaseAdmin as supabase } from '../lib/supabase.js';
 import { EstadosFluxo, ContextoSessao, DadosProduto, DadosOferta, AlteracaoPlanejada } from './types.js';
@@ -842,6 +844,21 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     }
 
     // ══════════════════════════════════════════════════════════
+    // ESCUDO GLOBAL ANTI-SPAM DE MÍDIA
+    // ══════════════════════════════════════════════════════════
+    if (isMediaOnly && contexto && contexto.estado !== EstadosFluxo.IDLE && contexto.estado !== EstadosFluxo.AGUARDANDO_DADOS_PRODUTO) {
+        logger.warn({ from, estado: contexto.estado }, '[Proteção] Mídia em estado não-esperado bloqueada');
+        
+        if (!temAvisoSpam(from)) {
+            setAvisoSpam(from, 15);
+            await sendTextMessage(from, '⚠️ Calma aí! Finalize a etapa pendente acima antes de enviar novas fotos ou áudios (clique no botão ou digite a opção solicitada).');
+        }
+        
+        await renovarTTLContexto(from);
+        return;
+    }
+
+    // ══════════════════════════════════════════════════════════
     // INTERCEPTADOR GLOBAL: Comandos especiais (qualquer estado)
     // ══════════════════════════════════════════════════════════
     if (isTextOnly && userMessageText.toLowerCase().trim().startsWith('/revisar')) {
@@ -918,9 +935,9 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     if (contexto && contexto.estado === EstadosFluxo.AGUARDANDO_SELECAO_REVISAO) {
         const lista = contexto.alteracoesPlanejadas ?? [];
 
-        // Detecta pares "número valor" na mensagem (ex: "1 8,50 2 15,00 3 7,99")
-        // Suporta separadores: espaço, tab, vírgula como decimal ou ponto
-        const pairsRegex = /(\d+)\s+([\d]+[.,][\d]+|[\d]+)/g;
+        // Detecta pares "número valor" na mensagem (ex: "1 8,50 2 15,00", "1- 8,50")
+        // Suporta separadores estendidos: espaço, tab, traço, dois pontos, barras.
+        const pairsRegex = /(\d+)[\s\-:=>*\/]+([\d]+[.,][\d]{1,2}|[\d]+)/g;
         const pares: { idx: number; preco: number }[] = [];
         let match: RegExpExecArray | null;
 
@@ -977,12 +994,11 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
         // Entrada não reconhecida — lembrar instrução
         if (isTextOnly && userMessageText.trim().length > 0) {
-            const exemplo = lista.slice(0, 2).map((_: AlteracaoPlanejada, i: number) => `${i + 1} 0,00`).join(' ');
+            const exemplo = lista.slice(0, 2).map((_: AlteracaoPlanejada, i: number) => `*${i + 1} - 0,00*`).join('\n');
             await sendTextMessage(from,
                 `✍️ *Como atualizar preços:*\n` +
-                `Digite o número do item e o novo preço, separados por espaço.\n` +
-                `Ex: *${exemplo}*\n\n` +
-                `Pode atualizar vários de uma vez!\n\n` +
+                `Digite o número do item e o novo preço. Pode mandar um embaixo do outro:\n\n` +
+                `Exemplo:\n${exemplo}\n\n` +
                 `_Para voltar ao menu, digite *cancelar*._`
             );
             await delay(300);
@@ -2432,9 +2448,9 @@ async function processarRevisaoPrecos(from: string, loja: any): Promise<void> {
     });
 
     // Gera exemplo dinâmico com os 2 primeiros itens
-    const ex1 = pendentes.length >= 1 ? `1 ${Number(pendentes[0]!.preco).toFixed(2).replace('.', ',')}` : '1 0,00';
-    const ex2 = pendentes.length >= 2 ? ` 2 ${Number(pendentes[1]!.preco).toFixed(2).replace('.', ',')}` : '';
-    relatorio += `\n✍️ Digite o número e o novo preço.\nEx: *${ex1}${ex2}*\n_Você pode atualizar vários de uma vez!_`;
+    const ex1 = pendentes.length >= 1 ? `*1 - ${Number(pendentes[0]!.preco).toFixed(2).replace('.', ',')}*` : '*1 - 0,00*';
+    const ex2 = pendentes.length >= 2 ? `\n*2 - ${Number(pendentes[1]!.preco).toFixed(2).replace('.', ',')}*` : '';
+    relatorio += `\n✍️ Digite o número e o novo preço.\nExemplo:\n${ex1}${ex2}\n\n_Você pode atualizar vários de uma vez!_`;
 
     await salvarContexto(from, {
         estado: EstadosFluxo.AGUARDANDO_SELECAO_REVISAO,

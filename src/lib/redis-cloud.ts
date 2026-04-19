@@ -126,3 +126,17 @@ export function ttlBucketMidia(whatsapp: string): number {
     const msRestante = Math.max(0, raw.expiresAt - Date.now());
     return Math.ceil(msRestante / 1000);
 }
+
+// ============================================================
+// Escudo Global de Spam (Proteção para bloqueios repetitivos)
+// ============================================================
+
+export function temAvisoSpam(whatsapp: string): boolean {
+    return cache.get(`aviso_spam_midia:${whatsapp}`) !== undefined;
+}
+
+export function setAvisoSpam(whatsapp: string, ttlSegundos: number): void {
+    try {
+        cache.set(`aviso_spam_midia:${whatsapp}`, true, ttlSegundos * 1000);
+    } catch { /* ignora erros de memória locais */ }
+}
