@@ -22,6 +22,7 @@ import {
     setAvisoSpam,
 } from '../lib/redis-cloud.js';
 import { supabaseAdmin as supabase } from '../lib/supabase.js';
+import { enviarLogAuditoria } from '../lib/audit.js';
 import { EstadosFluxo, ContextoSessao, DadosProduto, DadosOferta, AlteracaoPlanejada } from './types.js';
 import { detectarEstadoPorWhatsApp } from '../lib/location.js';
 import { logger, logTokens } from '../lib/logger.js';
@@ -637,6 +638,17 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     const userText = msg.text?.body?.trim() || 
                     (isInteractive ? (msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '') : '') ||
                     '';
+
+    // Grampo de Auditoria — captura exatamente O QUE o usuário enviou
+    enviarLogAuditoria({
+        whatsapp: from,
+        nivel: 'info',
+        contexto: 'USER_INPUT',
+        mensagem: isInteractive ? `👆 [Botão] "${userText}" (ID: ${buttonId})` :
+                  isMediaOnly   ? `📷 [Mídia] Tipo: ${msg.type}` :
+                                  `💬 [Texto] "${userText}"`,
+        dados: { text: userText, buttonId, type: msg.type }
+    });
 
     try {
         let loja = await buscarPerfilLoja(from);
