@@ -48,7 +48,10 @@ const delay        = (ms: number) => new Promise(res => setTimeout(res, ms));
 const MENU_SECTIONS = [
     {
         title: 'Gestão de Estoque',
-        rows: [{ id: 'menu_cadastrar', title: 'Cadastrar/Atualizar', description: 'Adicionar ou atualizar produtos' }],
+        rows: [
+            { id: 'menu_cadastrar', title: 'Cadastrar/Atualizar', description: 'Adicionar ou atualizar produtos' },
+            { id: 'menu_revisar', title: 'Revisar Preços', description: 'Ver preços desatualizados' },
+        ],
     },
     {
         title: 'Ofertas',
@@ -775,7 +778,20 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
                 if (error) throw error;
 
-                await sendTextMessage(from, `🎉 Tudo pronto, *${contexto.dadosLojista?.nome}*!\n\nSua loja foi cadastrada como *${categoriaKey.toUpperCase()}* em *${contexto.dadosLojista?.cidade}*.\nVocê ganhou 100 cliques de bônus para começar!`);
+                await sendTextMessage(from,
+                    `🎉 Tudo pronto, *${contexto.dadosLojista?.nome}*!\n\n` +
+                    `Sua loja foi cadastrada como *${categoriaKey.toUpperCase()}* em *${contexto.dadosLojista?.cidade}*.\n` +
+                    `Você ganhou *100 cliques de bônus* para começar! 🎁`
+                );
+                await delay(800);
+                await sendTextMessage(from,
+                    `📦 *Agora vamos montar seu catálogo!*\n\n` +
+                    `Você pode cadastrar seus produtos de 3 formas:\n\n` +
+                    `📷 *Foto* — Tire uma foto do encarte ou prateleira e me mande!\n` +
+                    `🎙️ *Áudio* — Me mande um áudio falando o nome e o preço.\n` +
+                    `✍️ *Texto* — Digite direto. Ex: _Feijão Carioca 8,50_\n\n` +
+                    `Comece agora! Quanto mais produtos, mais clientes vão te encontrar. 🚀`
+                );
                 await delay(500);
                 await limparContexto(from);
                 
@@ -839,6 +855,11 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     // ══════════════════════════════════════════════════════════
     if (isInteractive && buttonId.startsWith('menu_')) {
         const acao = buttonId.replace('menu_', '');
+
+        if (acao === 'revisar') {
+            await processarRevisaoPrecos(from, loja);
+            return;
+        }
 
         if (acao === 'cadastrar' || acao === 'revisar_renovar') {
             const msgInstrucao = acao === 'revisar_renovar'
@@ -957,7 +978,17 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         // Entrada não reconhecida — lembrar instrução
         if (isTextOnly && userMessageText.trim().length > 0) {
             const exemplo = lista.slice(0, 2).map((_: AlteracaoPlanejada, i: number) => `${i + 1} 0,00`).join(' ');
-            await sendTextMessage(from, `✍️ Digite o número e o preço separados por espaço.\nEx: *${exemplo}*\n\nVocê pode atualizar vários de uma vez!`);
+            await sendTextMessage(from,
+                `✍️ *Como atualizar preços:*\n` +
+                `Digite o número do item e o novo preço, separados por espaço.\n` +
+                `Ex: *${exemplo}*\n\n` +
+                `Pode atualizar vários de uma vez!\n\n` +
+                `_Para voltar ao menu, digite *cancelar*._`
+            );
+            await delay(300);
+            await sendInteractiveButtons(from, 'Ou prefere sair agora?', [
+                { id: 'btn_cancelar', title: '↩️ Voltar ao Menu' }
+            ]);
             return;
         }
     }
@@ -1010,8 +1041,18 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 return;
             }
 
-            // ── Passou pelas 3 camadas: processar normalmente ──
-            logger.info({ from }, '[Proativo] Mídia validada pelas 3 camadas. Iniciando extração...');
+            // ── Passou pelas 3 camadas: adquirir LOCK para evitar paralelismo ──
+            const lockKey = `lock:midia:${from}`;
+            const obteuLock = await adquirirLock(lockKey, 120); // TTL 2 minutos
+            if (!obteuLock) {
+                const msgLock = msg.type === 'image'
+                    ? '⏳ Ainda estou analisando sua última foto! Assim que terminar, me mande a próxima. 📷'
+                    : '⏳ Ainda estou ouvindo seu último áudio! Assim que terminar, pode mandar o próximo. 🎙️';
+                await sendTextMessage(from, msgLock);
+                return;
+            }
+
+            logger.info({ from }, '[Proativo] Lock adquirido. Iniciando extração...');
             await processarMidia(msg, from, loja, { estado: EstadosFluxo.IDLE });
             return;
         }
@@ -1826,8 +1867,10 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 // MULTIMODAL (Sprint 11)
 // ============================================================
 async function processarMidia(msg: WhatsAppMessage, from: string, loja: any, contexto: ContextoSessao): Promise<void> {
-    const MIME_PERMITIDOS = new Set(['image/jpeg', 'image/png', 'audio/ogg', 'audio/mpeg', 'audio/mp4', 'audio/ogg; codecs=opus']);
-    const TAMANHO_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+    const lockKey = `lock:midia:${from}`;
+    try {
+        const MIME_PERMITIDOS = new Set(['image/jpeg', 'image/png', 'audio/ogg', 'audio/mpeg', 'audio/mp4', 'audio/ogg; codecs=opus']);
+        const TAMANHO_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
 
     const mediaInfo = (msg as any).image || (msg as any).audio || (msg as any).voice;
     if (!mediaInfo?.id) {
@@ -1961,6 +2004,9 @@ JSON:`;
         logger.error({ err, from }, '[Erro multimodal]');
         await sendTextMessage(from, '😕 Não consegui processar o arquivo. Por favor, *digite* o Nome, Preço e Unidade do produto.');
         await renovarTTLContexto(from);
+    }
+    } finally {
+        await liberarLock(lockKey);
     }
 }
 
