@@ -54,6 +54,25 @@ async function main() {
 
     process.on('SIGINT',  shutdown);
     process.on('SIGTERM', shutdown);
+
+    // ── GATILHOS GLOBAIS DE MONITORAMENTO — Sprint 11 #3 ──
+    process.on('uncaughtException', async (err) => {
+        await logErroCritico({
+            origem: 'GLOBAL',
+            mensagem: `🔥 Crash Crítico (Uncaught): ${err.message}`,
+            err
+        });
+        process.exit(1);
+    });
+
+    process.on('unhandledRejection', async (reason) => {
+        await logErroCritico({
+            origem: 'GLOBAL',
+            mensagem: `🔥 Promessa Rejeitada: ${String(reason)}`,
+            err: reason
+        });
+    });
 }
 
+import { logErroCritico } from './lib/monitor.js';
 main();

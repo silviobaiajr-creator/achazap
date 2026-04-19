@@ -4,6 +4,9 @@ const BASE_URL = 'https://graph.facebook.com/v19.0';
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID!;
 const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN!;
 
+import { env } from '../config.js';
+import { cache } from './redis-cloud.js';
+
 /**
  * Envia uma mensagem de texto simples para um número WhatsApp.
  */
@@ -62,6 +65,31 @@ export async function sendTextMessage(to: string, text: string): Promise<void> {
         }
     }
 }
+
+/**
+ * Envia um alerta crítico para o WhatsApp do dono do sistema.
+ * Implementa trava de spam de 5 minutos por tipo de erro.
+ */
+export async function enviarAlertaDono(conteudo: string, contexto?: string): Promise<void> {
+    const owner = env.ACHAZAP_OWNER_NUMBER;
+    if (!owner) return;
+
+    // Trava de spam: 5 minutos por "assinatura" do erro (conteúdo simplificado)
+    const erroHash = `msg_alerta_dono:${conteudo.substring(0, 50)}`;
+    if (cache.get(erroHash)) {
+        console.info(`[AlertaDono] Alerta duplicado silenciado: ${conteudo.substring(0, 30)}...`);
+        return;
+    }
+    cache.set(erroHash, true, 5 * 60 * 1000);
+
+    const prefixo = '🚨 *[AchaZap - Alerta Sistema]*\n\n';
+    const msgFinal = `${prefixo}${conteudo}${contexto ? `\n\n📌 *Contexto:* ${contexto}` : ''}`;
+    
+    await sendTextMessage(owner, msgFinal).catch(err => {
+        console.error('❌ Falha crítica ao enviar alerta para o dono:', err.message);
+    });
+}
+
 
 /**
  * Envia botões interativos (limite de 3).

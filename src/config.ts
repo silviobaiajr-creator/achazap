@@ -26,6 +26,9 @@ const EnvSchema = z.object({
 
     // PostgreSQL Direto (PgBoss e Batch)
     DATABASE_URL: z.string().startsWith('postgres', 'DATABASE_URL inválida ou ausente'),
+
+    // Monitoramento
+    ACHAZAP_OWNER_NUMBER: z.string().optional(),
 });
 
 function validarEnv() {
