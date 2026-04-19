@@ -650,6 +650,40 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         dados: { text: userText, buttonId, type: msg.type }
     });
 
+    // ============================================================
+    // OWNER ADMIN TOOLS (Botões de Erro)
+    // ============================================================
+    if (from === process.env.ACHAZAP_OWNER_NUMBER && isInteractive) {
+        if (buttonId.startsWith('admin_diag_')) {
+            const targetNumber = buttonId.replace('admin_diag_', '');
+            
+            const { data: hist } = await supabase.from('historico_mensagens')
+                .select('role, content, created_at')
+                .eq('whatsapp', targetNumber)
+                .order('created_at', { ascending: false })
+                .limit(7);
+
+            let doc = `🔬 *Diagnóstico*: ${targetNumber}\n\n`;
+            if (hist && hist.length > 0) {
+                hist.reverse().forEach((h: any) => {
+                    const shortC = h.content.substring(0, 150).replace(/\n/g, ' ');
+                    doc += `*[${h.role === 'user' ? 'Lojista' : 'Robô'}]*\n"${shortC}"\n\n`;
+                });
+            } else {
+                doc += 'Nenhum histórico recente.';
+            }
+            await sendTextMessage(from, doc);
+            return;
+        }
+
+        if (buttonId.startsWith('admin_mute_')) {
+            const origemMute = buttonId.replace('admin_mute_', '');
+            cache.set(`admin_mute_${origemMute}`, true, 60 * 60 * 1000); // 1h
+            await sendTextMessage(from, `🔇 Alertas de erro da origem *${origemMute}* silenciados por 1 hora.`);
+            return;
+        }
+    }
+
     try {
         let loja = await buscarPerfilLoja(from);
         let contexto = await lerContexto(from) as ContextoSessao | null;

@@ -79,11 +79,19 @@ export async function sendTextMessage(to: string, text: string): Promise<void> {
  * Envia um alerta crítico para o WhatsApp do dono do sistema.
  * Implementa trava de spam de 5 minutos por tipo de erro.
  */
-export async function enviarAlertaDono(conteudo: string, contexto?: string): Promise<void> {
+export async function enviarAlertaDono(conteudo: string, whatsappLojista?: string, origem?: string, nivel?: string): Promise<void> {
     const owner = env.ACHAZAP_OWNER_NUMBER;
     if (!owner) return;
 
-    // Trava de spam: 5 minutos por "assinatura" do erro (conteúdo simplificado)
+    // Trava de spam: 5 minutos por "assinatura" do erro ou se origem estiver "mutada"
+    if (origem) {
+        const muteKey = `admin_mute_${origem}`;
+        if (cache.get(muteKey)) {
+            console.info(`[AlertaDono] Alerta silenciado temporariamente para origem: ${origem}`);
+            return; // Origem está mutada pelo dono
+        }
+    }
+
     const erroHash = `msg_alerta_dono:${conteudo.substring(0, 50)}`;
     if (cache.get(erroHash)) {
         console.info(`[AlertaDono] Alerta duplicado silenciado: ${conteudo.substring(0, 30)}...`);
@@ -91,12 +99,25 @@ export async function enviarAlertaDono(conteudo: string, contexto?: string): Pro
     }
     cache.set(erroHash, true, 5 * 60 * 1000);
 
-    const prefixo = '🚨 *[AchaZap - Alerta Sistema]*\n\n';
-    const msgFinal = `${prefixo}${conteudo}${contexto ? `\n\n📌 *Contexto:* ${contexto}` : ''}`;
-    
-    await sendTextMessage(owner, msgFinal).catch(err => {
-        console.error('❌ Falha crítica ao enviar alerta para o dono:', err.message);
-    });
+    const botoes = [];
+    if (whatsappLojista && whatsappLojista !== owner) {
+        botoes.push({ id: `admin_diag_${whatsappLojista}`, title: '🔎 Ver Timeline' });
+    }
+    if (origem) {
+        // IDs tem limite de 256 bytes na Meta. admin_mute_WEBHOOK cabe tranquilo
+        botoes.push({ id: `admin_mute_${origem.substring(0,20)}`, title: '🔇 Mute (1h)' });
+    }
+
+    if (botoes.length > 0) {
+        // Envia interativo para o dono
+        await sendInteractiveButtons(owner, conteudo, botoes).catch(err => {
+            console.error('❌ Falha crítica ao enviar botão de alerta para o dono:', err.message);
+        });
+    } else {
+        await sendTextMessage(owner, conteudo).catch(err => {
+            console.error('❌ Falha crítica ao enviar alerta texto para o dono:', err.message);
+        });
+    }
 }
 
 
