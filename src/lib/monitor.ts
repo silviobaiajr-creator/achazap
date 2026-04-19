@@ -9,7 +9,7 @@ import { enviarAlertaDono } from './whatsapp.js';
  * 3. Envia para o WhatsApp do Dono (Alerta imediato)
  */
 export async function logErroCritico(args: {
-    origem: 'PROCESSOR' | 'WEBHOOK' | 'GLOBAL' | 'DB' | 'AI';
+    origem: 'PROCESSOR' | 'WEBHOOK' | 'GLOBAL' | 'DB' | 'AI' | 'FLUXO_TESTE';
     whatsapp?: string;
     mensagem: string;
     err?: any;
@@ -38,4 +38,29 @@ export async function logErroCritico(args: {
 
     // 3. Alerta no WhatsApp (Com trava de spam interna na função)
     await enviarAlertaDono(mensagem, `*Origem:* ${origem}${whatsapp ? `\n*Lojista:* ${whatsapp}` : ''}`);
+}
+
+/**
+ * Grava um evento de fluxo no Supabase exclusivamente se o número for o Owner.
+ * Fire & Forget: não bloqueia a thread principal. Zero impacto na produção real.
+ */
+export function enviarLogAuditoria(args: {
+    whatsapp: string;
+    nivel: 'info' | 'warn' | 'error';
+    contexto: string;
+    mensagem: string;
+    dados?: Record<string, unknown>;
+}) {
+    const ownerNumber = process.env.ACHAZAP_OWNER_NUMBER;
+    if (!ownerNumber || args.whatsapp !== ownerNumber) return;  // Ignora usuários reais
+
+    supabaseAdmin.from('logs_dev').insert([{
+        whatsapp: args.whatsapp,
+        nivel:    args.nivel,
+        contexto: args.contexto,
+        mensagem: args.mensagem,
+        dados:    args.dados ?? null,
+    }]).then(({ error }) => {
+        if (error) logger.warn({ error }, '⚠️ Falha ao salvar log_dev no Supabase');
+    });
 }

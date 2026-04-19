@@ -4,6 +4,7 @@
  * nível e contexto, rastreáveis em produção.
  */
 import pino from 'pino';
+import { enviarLogAuditoria } from './monitor.js';
 
 export const logger = pino({
     level: process.env.LOG_LEVEL ?? 'info',
@@ -15,10 +16,30 @@ export const logger = pino({
 
 /**
  * Cria um logger filho com contexto fixo (from, estado).
- * Use-o dentro do processMessage para rastrear uma conversa inteira.
+ * Se o `from` for o número do Owner, instala um "Grampo de Auditoria":
+ * cada linha de log é espelhada silenciosamente no Supabase (logs_dev).
  */
 export function criarLoggerConversa(from: string, estado?: string) {
-    return logger.child({ from, estado });
+    const child = logger.child({ from, estado });
+    const ownerNumber = process.env.ACHAZAP_OWNER_NUMBER;
+
+    if (!ownerNumber || from !== ownerNumber) return child;
+
+    // --- Grampo de Auditoria (só ativo para o Owner) ---
+    const ctx = estado ?? 'DESCONHECIDO';
+    const intercept = (nivel: 'info' | 'warn' | 'error') =>
+        (dadosOuMsg: any, msg?: string) => {
+            const mensagem = typeof dadosOuMsg === 'string' ? dadosOuMsg : (msg ?? '');
+            const dados    = typeof dadosOuMsg === 'object' ? dadosOuMsg : undefined;
+            enviarLogAuditoria({ whatsapp: from, nivel, contexto: ctx, mensagem, dados });
+            return (child[nivel] as any)(dadosOuMsg, msg);
+        };
+
+    return Object.assign(Object.create(child), {
+        info:  intercept('info'),
+        warn:  intercept('warn'),
+        error: intercept('error'),
+    });
 }
 
 /**

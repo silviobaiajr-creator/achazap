@@ -15,15 +15,36 @@ async function rodarDiagnostico(telefoneDono: string) {
         .select('*')
         .or(`whatsapp.eq.${telefoneDono},whatsapp.is.null`)
         .order('created_at', { ascending: false })
-        .limit(5);
+        .limit(10);
 
-    // 2. Busca as últimas 10 mensagens no histórico deste usuário
+    // 2. Busca as últimas 200 entradas de auditoria de fluxo do Owner
+    const { data: fluxo } = await supabaseAdmin
+        .from('logs_dev')
+        .select('created_at, nivel, contexto, mensagem, dados')
+        .eq('whatsapp', telefoneDono)
+        .order('created_at', { ascending: false })
+        .limit(200);
+
+    // 3. Busca as últimas 20 mensagens no histórico deste usuário
     const { data: historico } = await supabaseAdmin
         .from('historico_mensagens')
         .select('created_at, role, content')
         .eq('whatsapp', telefoneDono)
         .order('created_at', { ascending: false })
-        .limit(10);
+        .limit(20);
+
+    console.log('\n======================================================');
+    console.log('🔬 TRILHA DE AUDITORIA DE FLUXO (logs_dev) — 200 eventos');
+    console.log('======================================================');
+    if (!fluxo || fluxo.length === 0) {
+        console.log('Nenhum log de auditoria encontrado. Envie uma mensagem com seu número de dono para começar.');
+    } else {
+        fluxo.reverse().forEach((e: any) => {
+            const icone = e.nivel === 'error' ? '🔴' : e.nivel === 'warn' ? '🟡' : '🟢';
+            console.log(`${icone} [${e.created_at}] [${e.contexto}] ${e.mensagem}`);
+            if (e.dados) console.log(`   Dados: ${JSON.stringify(e.dados).substring(0, 120)}`);
+        });
+    }
 
     console.log('\n======================================================');
     console.log('🚨 ÚLTIMOS ERROS CRÍTICOS (Render / Sistema)');
@@ -38,7 +59,7 @@ async function rodarDiagnostico(telefoneDono: string) {
     }
 
     console.log('\n======================================================');
-    console.log('💬 ÚLTIMAS MENSAGENS (Timeline do Flow)');
+    console.log('💬 ÚLTIMAS MENSAGENS (Timeline do Flow — 20 msgs)');
     console.log('======================================================');
     if (!historico || historico.length === 0) {
         console.log('Nenhum histórico encontrado.');
