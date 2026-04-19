@@ -789,7 +789,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 await sendTextMessage(from,
                     `📦 *Agora vamos montar seu catálogo!*\n\n` +
                     `Você pode cadastrar seus produtos de 3 formas:\n\n` +
-                    `📷 *Foto* — Tire uma foto do encarte ou prateleira e me mande!\n` +
+                    `📷 *Foto* — Mande a foto de um produto, ou de um encarte/cardápio inteiro (eu leio vários produtos de uma vez só)!\n` +
                     `🎙️ *Áudio* — Me mande um áudio falando o nome e o preço.\n` +
                     `✍️ *Texto* — Digite direto. Ex: _Feijão Carioca 8,50_\n\n` +
                     `Comece agora! Quanto mais produtos, mais clientes vão te encontrar. 🚀`
@@ -836,7 +836,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             '  • Planilha Excel: *.xlsx, .xlsm, .xls*\n' +
             '  • Texto CSV: *.csv*\n\n' +
             'Para cadastrar um produto, você também pode:\n' +
-            '  📷 Tirar uma *foto* do encarte\n' +
+            '  📷 Mandar uma *única foto* de todo o encarte ou cardápio (eu leio vários de uma vez!)\n' +
             '  🎙️ Enviar um *áudio* com os dados\n' +
             '  ✍️ *Digitar* o nome, preço e unidade'
         );
@@ -884,8 +884,8 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
         if (acao === 'cadastrar' || acao === 'revisar_renovar') {
             const msgInstrucao = acao === 'revisar_renovar'
-                ? 'Ótimo! Vamos renovar seus preços. Você pode:\n\n📷 Tirar uma *foto* do encarte ou prateleira\n🎙️ Mandar um *áudio* rápido\n✍️ Ou *digitar* os novos valores (ex: Arroz 8,50)\n\nEstou aguardando!'
-                : 'Ótimo! Para cadastrar ou atualizar produtos, você pode:\n\n📷 Tirar uma *foto* do encarte\n🎙️ Mandar um *áudio*\n✍️ Ou *digitar* o nome e preço (ex: Feijão 10,00)\n\nO que deseja enviar?';
+                ? 'Ótimo! Vamos renovar seus preços. Você pode:\n\n📷 Mandar uma *única foto* de todo o encarte ou cardápio (eu atualizo vários de uma vez!)\n🎙️ Mandar um *áudio* rápido\n✍️ Ou *digitar* os novos valores (ex: Arroz 8,50)\n\nEstou aguardando!'
+                : 'Ótimo! Para cadastrar ou atualizar, você pode:\n\n📷 Mandar uma *única foto* de todo o encarte ou cardápio (eu leio vários de uma vez!)\n🎙️ Mandar um *áudio*\n✍️ Ou *digitar* o nome e preço (ex: Feijão 10,00)\n\nO que deseja enviar?';
 
             await salvarContexto(from, {
                 estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO,
