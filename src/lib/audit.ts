@@ -1,7 +1,8 @@
 /**
  * Módulo de Auditoria de Fluxo — sem dependência circular.
  * Importado por logger.ts e monitor.ts sem risco de loop.
- * Grava no Supabase logs_dev apenas se o número for o Owner.
+ * Grava no Supabase logs_dev para TODOS os usuários — o campo
+ * `whatsapp` armazena o número real do usuário para diagnóstico.
  */
 import { supabaseAdmin } from './supabase.js';
 
@@ -12,9 +13,7 @@ export function enviarLogAuditoria(args: {
     mensagem: string;
     dados?: Record<string, unknown>;
 }) {
-    const ownerNumber = process.env.ACHAZAP_OWNER_NUMBER;
-    if (!ownerNumber || args.whatsapp !== ownerNumber) return; // ignora usuários reais
-
+    // Grava para qualquer usuário — fundamental para diagnosticar fluxos de consumidores.
     supabaseAdmin.from('logs_dev').insert([{
         whatsapp: args.whatsapp,
         nivel:    args.nivel,
