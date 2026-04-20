@@ -744,10 +744,19 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         // Vou fazer essa busca de usuario se loja for null e contexto for nulo/idle.
         let usuario = null;
         if (!loja && (!contexto || contexto.estado === EstadosFluxo.IDLE)) {
-             const { data } = await supabase.from('usuarios').select('*').eq('whatsapp', from.startsWith('+') ? from : '+' + from).maybeSingle();
+             const whatsappComPlus = from.startsWith('+') ? from : '+' + from;
+             const { data } = await supabase.from('usuarios').select('*').eq('whatsapp', whatsappComPlus).maybeSingle();
              usuario = data;
              if (usuario) {
-                 contexto = { estado: EstadosFluxo.CONSUMIDOR_IDLE, dadosConsumidor: { cidade: usuario.cidade, bairro: usuario.bairro, nome: usuario.nome } };
+                 contexto = { 
+                     estado: EstadosFluxo.CONSUMIDOR_IDLE, 
+                     dadosConsumidor: { 
+                         cidade: usuario.cidade, 
+                         bairro: usuario.bairro, 
+                         estado: usuario.estado, 
+                         nome: usuario.nome 
+                     } 
+                 };
              }
         }
 
