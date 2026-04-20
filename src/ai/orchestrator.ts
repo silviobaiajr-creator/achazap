@@ -997,6 +997,13 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         }
 
         if (isTextOnly && userMessageText) {
+            const txtLimpo = userMessageText.trim().toLowerCase();
+            const greetings = ['oi', 'olá', 'ola', 'oie', 'bom dia', 'boa tarde', 'boa noite', 'tudo bem'];
+            if (greetings.includes(txtLimpo) || txtLimpo.length < 3) {
+                await sendTextMessage(from, 'Olá! O que você quer comprar hoje? Pode digitar ex: "Pizza", "Leite", etc.');
+                return;
+            }
+
             // Extrair núcleo do produto para evitar falhas de like/tsquery no banco (ex: "tem feijão aí?" -> "feijão")
             let termoBusca = userMessageText;
             if (userMessageText.length > 20 || userMessageText.trim().split(/\s+/).length > 1) {
@@ -1050,7 +1057,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                     promoText = `\n🎁 *Promo da Loja:* Ganhe ${Number(promocoes[0].percentual)}% OFF comprando mais de R$ ${promocoes[0].valor_minimo}`;
                 }
 
-                msgBusca += `🥇 *Opção ${i+1}:* R$ ${Number(offer.preco).toFixed(2).replace('.',',')} / ${offer.unidade}\n`;
+                msgBusca += `🥇 *Opção ${i+1}:* *${offer.produto_nome}* por R$ ${Number(offer.preco_atual).toFixed(2).replace('.',',')} / ${offer.unidade}\n`;
                 msgBusca += `📍 *Distância:* Aprox. ${(Math.random() * 3 + 0.5).toFixed(1)} km`; // Mock de distancia temporário
                 msgBusca += promoText ? `${promoText}\n\n` : `\n\n`;
             }
