@@ -82,7 +82,9 @@ REDIS_URL=
 | F5 — Histórico | ✅ | Auditoria de preços e selo de frescor. |
 | F6 — Ingestão | ✅ | Multi-produto (Texto, Foto, Áudio, CSV). |
 | F7 — Observabilidade| ✅ | DNA de Autodiagnóstico e alertas remotos. |
-| F8 — Hardening | 🏗️ | Blindagem contra as 16 Armadilhas (Em curso). |
+| F8 — Hardening | ✅ | Blindagem contra as 16 Armadilhas (Em curso). |
+| F9 — Modo Consumidor| ✅ | Busca Blindada, Revenue-Locking via botão iterativo. |
+| F10 — Hub Analítico | ✅ | Worker para insights de cross-selling de preço. |
 
 ---
 
