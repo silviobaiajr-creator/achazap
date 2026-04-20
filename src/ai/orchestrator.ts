@@ -987,7 +987,24 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         }
 
         if (isTextOnly && userMessageText) {
-            await sendTextMessage(from, `🔍 Procurando as opções de *${userMessageText}* mais baratas e próximas de você em ${contexto!.dadosConsumidor?.bairro}...`);
+            // Extrair núcleo do produto para evitar falhas de like/tsquery no banco (ex: "tem feijão aí?" -> "feijão")
+            let termoBusca = userMessageText;
+            if (userMessageText.length > 20 || userMessageText.split(' ').length > 2) {
+                try {
+                    const extraido = await ai.models.generateContent({
+                        model: GEMINI_MODEL,
+                        contents: `Extraia APENAS o termo principal de busca do consumidor, removendo intenções: "${userMessageText}".\nExemplos: "Quero comer pizza" -> "pizza", "Encontre por feijão preto" -> "feijão preto", "tem leite ninho grande?" -> "leite ninho"`,
+                        config: { temperature: 0 }
+                    });
+                    if (extraido.text) {
+                        termoBusca = extraido.text.trim();
+                    }
+                } catch {
+                    // fallback to original if LLM fails
+                }
+            }
+
+            await sendTextMessage(from, `🔍 Procurando as opções de *${termoBusca}* mais baratas e próximas de você em ${contexto!.dadosConsumidor?.bairro}...`);
             await delay(1500);
 
             // Fetch DB `buscar_ofertas` RPC
@@ -995,7 +1012,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 p_cidade: contexto!.dadosConsumidor?.cidade,
                 p_bairro: contexto!.dadosConsumidor?.bairro,
                 p_estado: contexto!.dadosConsumidor?.estado,
-                p_query: userMessageText
+                p_query: termoBusca
             });
 
             if (error || !ofertas || ofertas.length === 0) {
