@@ -835,6 +835,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                         whatsapp: from.startsWith('+') ? from : '+' + from,
                         cidade,
                         bairro,
+                        estado,
                     },
                     { onConflict: 'whatsapp' }
                 );
@@ -998,7 +999,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         if (isTextOnly && userMessageText) {
             // Extrair núcleo do produto para evitar falhas de like/tsquery no banco (ex: "tem feijão aí?" -> "feijão")
             let termoBusca = userMessageText;
-            if (userMessageText.length > 20 || userMessageText.split(' ').length > 2) {
+            if (userMessageText.length > 20 || userMessageText.trim().split(/\s+/).length > 1) {
                 try {
                     const extraido = await ai.models.generateContent({
                         model: GEMINI_MODEL,
@@ -1020,7 +1021,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             const { data: ofertas, error } = await supabase.rpc('buscar_ofertas', {
                 p_cidade: contexto!.dadosConsumidor?.cidade,
                 p_bairro: contexto!.dadosConsumidor?.bairro,
-                p_estado: contexto!.dadosConsumidor?.estado,
+                p_estado: contexto!.dadosConsumidor?.estado || 'PA',
                 p_query: termoBusca
             });
 
