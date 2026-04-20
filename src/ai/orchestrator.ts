@@ -203,7 +203,11 @@ async function executarFuga(from: string, loja: any): Promise<void> {
     await limparContexto(from); // Sprint 6 #3: expurgo total — zero zumbis
     await sendTextMessage(from, 'Sem problemas! Operação cancelada. 🧹 O que gostaria de fazer agora?');
     await delay(300);
-    await enviarMenu(loja.nome, from);
+    if (loja) {
+        await enviarMenu(loja.nome, from);
+    } else {
+        await sendTextMessage(from, 'O que você está procurando hoje?');
+    }
 }
 
 // ============================================================
@@ -720,14 +724,30 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         // ══════════════════════════════════════════════════════════
         if (!loja) {
 
-        // Se não há contexto, inicia boas vindas
-        if (!contexto || (contexto.estado !== EstadosFluxo.ONBOARDING_PERFIL && 
-                         contexto.estado !== EstadosFluxo.ONBOARDING_NOME && 
-                         contexto.estado !== EstadosFluxo.ONBOARDING_LOCALIZACAO &&
-                         contexto.estado !== EstadosFluxo.ONBOARDING_CATEGORIA)) {
-            
-            logger.info({ from }, '[Onboarding] Novo número detectado. Iniciando dispatcher.');
-            await salvarContexto(from, { estado: EstadosFluxo.ONBOARDING_PERFIL });
+        // Se não há contexto E não é um consumidor já cadastrado (fazer check depois), inicia boas vindas
+        // Para simplificar, se não há contexto, a gente deveria tentar buscar usuário tbm.
+        // Vou fazer essa busca de usuario se loja for null e contexto for nulo/idle.
+        let usuario = null;
+        if (!loja && (!contexto || contexto.estado === EstadosFluxo.IDLE)) {
+             const { data } = await supabase.from('usuarios').select('*').eq('whatsapp', from.startsWith('+') ? from : '+' + from).maybeSingle();
+             usuario = data;
+             if (usuario) {
+                 contexto = { estado: EstadosFluxo.CONSUMIDOR_IDLE, dadosConsumidor: { cidade: usuario.cidade, bairro: usuario.bairro, nome: usuario.nome } };
+             }
+        }
+
+        if (!loja && !usuario) {
+            if (!contexto || (
+                 contexto.estado !== EstadosFluxo.ONBOARDING_PERFIL && 
+                 contexto.estado !== EstadosFluxo.ONBOARDING_NOME && 
+                 contexto.estado !== EstadosFluxo.ONBOARDING_LOCALIZACAO &&
+                 contexto.estado !== EstadosFluxo.ONBOARDING_CATEGORIA &&
+                 contexto.estado !== EstadosFluxo.ONBOARDING_CONSUMIDOR_LOCALIZACAO &&
+                 contexto.estado !== EstadosFluxo.CONSUMIDOR_IDLE
+            )) {
+                
+                logger.info({ from }, '[Onboarding] Novo número detectado. Iniciando dispatcher.');
+                await salvarContexto(from, { estado: EstadosFluxo.ONBOARDING_PERFIL });
             await sendInteractiveButtons(from, 
                 'Olá! 👋 Bem-vindo ao AchaZap.\n\nIdentifiquei que este é seu primeiro contato. Como posso te ajudar hoje?',
                 [
@@ -746,8 +766,8 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 return;
             }
             if (buttonId === 'perf_consumidor') {
-                await sendTextMessage(from, '👋 A Vitrine AchaZap está chegando em breve na sua região! Por enquanto, este canal é dedicado para lojistas organizarem seus estoques.\n\nFique ligado nas novidades!');
-                await limparContexto(from);
+                await salvarContexto(from, { ...contexto, estado: EstadosFluxo.ONBOARDING_CONSUMIDOR_LOCALIZACAO });
+                await sendTextMessage(from, 'Ótimo! 🛍️ Para te mostrar as melhores ofertas perto de você, qual a sua *Cidade e Bairro*?\n\nEx: Portel, Castanheira');
                 return;
             }
             // Repetir se não escolher opção válida
@@ -770,6 +790,42 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 dadosLojista: { nome: userText }
             });
             await sendTextMessage(from, `Legal, *${userText}*!\n\nAgora, qual a sua *Cidade e Bairro*?\nEx: Portel, Castanheira`);
+            return;
+        }
+
+        // Fluxo: Localização Consumidor
+        if (contexto.estado === EstadosFluxo.ONBOARDING_CONSUMIDOR_LOCALIZACAO) {
+            const extraidos = userText.split(',').map(s => s.trim());
+            if (extraidos.length < 2) {
+                await sendTextMessage(from, 'Para encontrar as melhores ofertas, preciso da sua Cidade e Bairro separados por vírgula.\nEx: Portel, Castanheira');
+                return;
+            }
+
+            const [cidade, bairro] = extraidos;
+            const estado = detectarEstadoPorWhatsApp(from) || 'PA';
+
+            // Registra o consumidor (se não existir, o upsert cria)
+            try {
+                const { error } = await supabase.from('usuarios').upsert(
+                    {
+                        whatsapp: from.startsWith('+') ? from : '+' + from,
+                        cidade,
+                        bairro,
+                    },
+                    { onConflict: 'whatsapp' }
+                );
+                if (error) throw error;
+            } catch (err) {
+                logger.error({ err }, '[Onboarding] Erro ao cadastrar consumidor');
+            }
+
+            await salvarContexto(from, { 
+                ...contexto, 
+                estado: EstadosFluxo.CONSUMIDOR_IDLE,
+                dadosConsumidor: { ...contexto.dadosConsumidor, cidade, bairro, estado }
+            });
+
+            await sendTextMessage(from, `🎉 Perfeito! A partir de agora, o AchaZap vai procurar ofertas em *${cidade}*.\n\nO que você quer comprar hoje?\nEx: *"Onde tem Picanha?"* ou *"Pizza"*`);
             return;
         }
 
@@ -869,11 +925,103 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 return;
             }
         }
-    }
+    } // Closes if (!loja && !usuario)
+    } // Closes if (!loja)
 
     const userMessageText = userText;
 
     logger.debug({ from, estado: contexto?.estado ?? 'IDLE', tipo: msg.type, texto: userMessageText || '[media]' }, '[processMessage]');
+
+    // ══════════════════════════════════════════════════════════
+    // MODO CONSUMIDOR: BLIND SEARCH + CROSS SELL
+    // ══════════════════════════════════════════════════════════
+    const isUsuarioConsumidor = !loja && contexto?.estado === EstadosFluxo.CONSUMIDOR_IDLE;
+    
+    if (isUsuarioConsumidor) {
+        if (buttonId.startsWith('revelar_')) {
+            const [, idOferta, idLoja] = buttonId.split('_');
+            
+            const { data: usuarioData } = await supabase.from('usuarios').select('id').eq('whatsapp', from.startsWith('+') ? from : '+' + from).maybeSingle();
+            const usuarioId = usuarioData?.id || '00000000-0000-0000-0000-000000000000';
+
+            const { data } = await supabase.from('lojas').select('whatsapp, nome').eq('id', idLoja).single();
+
+            if (data) {
+                // Registrar clique consumido.
+                await supabase.from('cliques_consumidos').insert({
+                    loja_id: idLoja,
+                    usuario_id: usuarioId,
+                    produto_ref: 'revelacao',
+                    link_token: 'unlock_' + Math.random().toString(36).substring(7),
+                    debitado: true
+                });
+
+                // Deduzir 1 clique (poderia ser trigger, mas vamos via rpc se precisar ou server.ts já faz isso na api de link).
+                // Actually need to check if decrementar_saldo RPC exists. We can just update directly for now since it's a test scale.
+                const { error: rpcErr } = await supabase.rpc('decrementar_saldo', { p_loja_id: idLoja, p_qtd: 1 });
+                if (rpcErr) {
+                    const { data: l } = await supabase.from('lojas').select('saldo_cliques').eq('id', idLoja).single();
+                    if(l) await supabase.from('lojas').update({ saldo_cliques: Math.max(0, l.saldo_cliques - 1) }).eq('id', idLoja);
+                }
+
+                await sendTextMessage(from, `🎉 *Nome Revelado!*\n\nA opção escolhida foi a loja *${data.nome}*.\n\n📲 Pode mandar o Zap pra eles: ${data.whatsapp}\n\nDica: Diga que veio pelo AchaZap para eles manterem as ofertas!`);
+            } else {
+                await sendTextMessage(from, 'Loja indisponível.');
+            }
+            return;
+        }
+
+        if (isTextOnly && userMessageText) {
+            await sendTextMessage(from, `🔍 Procurando as opções de *${userMessageText}* mais baratas e próximas de você em ${contexto!.dadosConsumidor?.bairro}...`);
+            await delay(1500);
+
+            // Fetch DB `buscar_ofertas` RPC
+            const { data: ofertas, error } = await supabase.rpc('buscar_ofertas', {
+                p_cidade: contexto!.dadosConsumidor?.cidade,
+                p_bairro: contexto!.dadosConsumidor?.bairro,
+                p_estado: contexto!.dadosConsumidor?.estado,
+                p_query: userMessageText
+            });
+
+            if (error || !ofertas || ofertas.length === 0) {
+                await sendTextMessage(from, '😕 Poxa, ainda não encontrei nenhuma loja com essa oferta na sua região. Tente buscar outro produto!');
+                return;
+            }
+
+            // Pega top 3
+            const top3 = ofertas.slice(0, 3);
+            let msgBusca = `🎯 *Encontrei ${ofertas.length} opções!*\n\nVeja as melhores:\n\n`;
+
+            for (let i = 0; i < top3.length; i++) {
+                const offer = top3[i];
+                
+                // Cross sell: check if loja has active offers
+                const { data: promocoes } = await supabase
+                    .from('ofertas_desconto')
+                    .select('*')
+                    .eq('loja_id', offer.loja_id)
+                    .eq('ativa', true)
+                    .gte('validade', new Date().toISOString());
+
+                let promoText = '';
+                if (promocoes && promocoes.length > 0) {
+                    promoText = `\n🎁 *Promo da Loja:* Ganhe ${Number(promocoes[0].percentual)}% OFF comprando mais de R$ ${promocoes[0].valor_minimo}`;
+                }
+
+                msgBusca += `🥇 *Opção ${i+1}:* R$ ${Number(offer.preco).toFixed(2).replace('.',',')} / ${offer.unidade}\n`;
+                msgBusca += `📍 *Distância:* Aprox. ${(Math.random() * 3 + 0.5).toFixed(1)} km`; // Mock de distancia temporário
+                msgBusca += promoText ? `${promoText}\n\n` : `\n\n`;
+            }
+
+            await sendInteractiveButtons(from, msgBusca + `👀 Deseja revelar a loja da Opção 1? Seremos transparentes: isso gasta os preciosos e poucos créditos do lojista, então só clique se você realmente tiver intenção de avaliar a oferta!`, [
+                { id: `revelar_${top3[0].id}_${top3[0].loja_id}`, title: '🔓 Revelar Opção 1' }
+            ]);
+            return;
+        }
+        
+        await sendTextMessage(from, 'O que você está procurando hoje? Pode digitar ex: "Pizza", "Leite", etc.');
+        return;
+    }
 
     // ══════════════════════════════════════════════════════════
     // INTERCEPTADOR DE DOCUMENTOS (CSV/Excel) - Sprint 14

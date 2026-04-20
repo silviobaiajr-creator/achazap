@@ -44,15 +44,13 @@ describe('Worker Processing Stress Test (pg-boss)', () => {
         console.log(`\n📦 [WORKER STRESS TEST] Injetando ${TOTAL_JOBS} mensagens na fila "messages"...`);
         
         const perfStart = Date.now();
-        const promises = [];
         for (let i = 0; i < TOTAL_JOBS; i++) {
-            promises.push(boss.send('messages', {
+            await boss.send('messages', {
                 from: `551199999${(i).toString().padStart(4, '0')}`,
                 type: 'text',
                 text: { body: `Stress Test #${i}` }
-            }));
+            });
         }
-        await Promise.all(promises);
         console.log(`✅ Injeção completa. Iniciando o Worker...`);
 
         // Zera o mock para contagem

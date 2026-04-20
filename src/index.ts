@@ -3,6 +3,7 @@ import './config.js';
 import { buildServer } from './server.js';
 import { startMessageWorker } from './processor/messageProcessor.js';
 import { startValidityWorker } from './processor/validityWorker.js';
+import { startAnalysisWorker } from './processor/analysisWorker.js';
 import { startQueue, boss } from './queue/pgBossClient.js';
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -26,6 +27,13 @@ async function main() {
             console.log('✅ Worker de Validade (Cron 9h) ativo');
         } catch (err) {
             console.error('❌ Falha ao iniciar worker de validade:', err);
+        }
+
+        try {
+            await startAnalysisWorker();
+            console.log('✅ Worker Analytics Insights (Cron Segunda 9h) ativo');
+        } catch (err) {
+            console.error('❌ Falha ao iniciar worker Analytics:', err);
         }
         
         await app.listen({ port: PORT, host: '0.0.0.0' });

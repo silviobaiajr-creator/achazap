@@ -18,6 +18,10 @@ export enum EstadosFluxo {
     ONBOARDING_CATEGORIA = 'ONBOARDING_CATEGORIA',
     AGUARDANDO_SELECAO_REVISAO = 'AGUARDANDO_SELECAO_REVISAO',
     AGUARDANDO_QUANTIDADE_EMBALAGEM = 'AGUARDANDO_QUANTIDADE_EMBALAGEM', // Armadilha 11: fardo sem qtd
+    
+    // Estados do Consumidor
+    ONBOARDING_CONSUMIDOR_LOCALIZACAO = 'ONBOARDING_CONSUMIDOR_LOCALIZACAO',
+    CONSUMIDOR_IDLE = 'CONSUMIDOR_IDLE',
 }
 
 export interface DadosProduto {
@@ -64,6 +68,12 @@ export interface ContextoSessao {
         bairro?: string;
         estado?: string;
         categoria?: string;
+    };
+    dadosConsumidor?: {
+        nome?: string;
+        cidade?: string;
+        bairro?: string;
+        estado?: string;
     };
     acao?: string;
     perguntaPendente?: string;
