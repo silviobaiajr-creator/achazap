@@ -139,6 +139,20 @@ async function verificarFugaGlobal(
     // Nível 0: só faz sentido se há contexto ativo
     const temContextoAtivo = contexto !== null && contexto.estado !== EstadosFluxo.IDLE;
 
+    // 🛡️ GUARD: Estados de onboarding e modo consumidor são IMUNES à fuga global.
+    // Nesses estados, o bot está coletando dados — qualquer mensagem é válida.
+    const estadosImunes = new Set([
+        EstadosFluxo.ONBOARDING_PERFIL,
+        EstadosFluxo.ONBOARDING_NOME,
+        EstadosFluxo.ONBOARDING_LOCALIZACAO,
+        EstadosFluxo.ONBOARDING_CATEGORIA,
+        EstadosFluxo.ONBOARDING_CONSUMIDOR_LOCALIZACAO,
+        EstadosFluxo.CONSUMIDOR_IDLE,
+    ]);
+    if (contexto && estadosImunes.has(contexto.estado)) {
+        return false;
+    }
+
     // Nível 1: botão interativo de fuga (Sprint 6 #4)
     if (msg.type === 'interactive' && IDS_BOTAO_FUGA.has(buttonId)) {
         await executarFuga(from, loja);
@@ -165,6 +179,7 @@ async function verificarFugaGlobal(
 
     return false;
 }
+
 
 async function detectarFugaNLP(texto: string): Promise<boolean> {
     try {
