@@ -26,11 +26,14 @@ CREATE OR REPLACE FUNCTION public.buscar_ofertas_semantico(
 RETURNS TABLE (
     id uuid,
     loja_id uuid,
+    loja_nome text,
+    whatsapp_loja text,
+    faz_delivery boolean,
     produto_nome text,
-    preco numeric,
+    produto_sku text,
+    preco_atual numeric,
     unidade text,
-    disponivel boolean,
-    atualizado_em timestamptz,
+    registrado_em timestamptz,
     similarity float
 )
 LANGUAGE plpgsql
@@ -41,11 +44,14 @@ BEGIN
     SELECT 
         c.id,
         c.loja_id,
-        c.produto_nome,
-        c.preco,
-        c.unidade,
-        c.disponivel,
-        c.atualizado_em,
+        l.nome::text AS loja_nome,
+        l.whatsapp::text AS whatsapp_loja,
+        l.faz_delivery,
+        c.produto_nome::text,
+        ''::text AS produto_sku,
+        c.preco AS preco_atual,
+        c.unidade::text,
+        c.atualizado_em AS registrado_em,
         -- Cosine similarity: 1 - Cosine Distance
         1 - (c.embedding <=> p_query_embedding) AS similarity
     FROM public.catalogo_ativo c
