@@ -8,6 +8,7 @@ import { ai, GEMINI_MODEL } from '../../lib/gemini.js';
 import { logTokens } from '../../lib/logger.js';
 import { FugaNLPSchema, parseSafe } from '../schemas.js';
 import { z } from 'zod';
+import { logger } from '../../lib/logger.js';
 
 /**
  * Detecta se o texto indica intenção de sair/cancelar o fluxo atual.
@@ -47,5 +48,43 @@ export async function detectarIntencaoProativa(texto: string): Promise<boolean> 
         return dados.intencao_cadastro === true;
     } catch {
         return false;
+    }
+}
+
+/**
+ * Filtro de Qualidade (Reranking): Recebe os itens brutos da busca vetorial
+ * e usa o Gemini para determinar quais realmente atendem à intenção do usuário.
+ */
+export async function refinarCandidatosBusca(termoUsuario: string, candidatos: any[]): Promise<string[] | null> {
+    if (!candidatos || candidatos.length === 0) return [];
+    
+    // Filtramos apenas dados essenciais para economizar tokens
+    const candsSlim = candidatos.map(c => ({ id: c.id, nome: c.produto_nome, preco: c.preco_atual, un: c.unidade }));
+    
+    try {
+        const result = await ai.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: `Você é um refinador de busca de e-commerce.
+O usuário buscou o termo exato: "${termoUsuario}"
+O banco de dados vetorial retornou a seguinte lista de possíveis candidatos (candsSlim):
+${JSON.stringify(candsSlim)}
+
+Sua tarefa: Retornar APENAS os IDs dos produtos que FAZEM SENTIDO e correspondem diretamente ou são sinônimos pertinentes para o que o usuário quer.
+Exemplo: Se o usuário quer "Ração", não retorne o ID de "Coca-Cola" ou "Prato".
+Se nada fizer sentido, retorne uma array vazia [].
+
+Retorne EXCLUSIVAMENTE um JSON com este formato:
+{"ids_validos": ["uuid1", "uuid2"]}
+`,
+            config: { responseMimeType: 'application/json', temperature: 0.1 },
+        });
+        
+        logTokens('refinar_candidatos_busca', 'system', 'system', result.usageMetadata);
+        const schema = z.object({ ids_validos: z.array(z.string()) });
+        const dados = parseSafe(schema, result.text || '{}', { ids_validos: [] });
+        return dados.ids_validos;
+    } catch (e) {
+        logger.error({ erro: e, termo: termoUsuario }, '[Motor Semântico] Erro no Reranking do Gemini');
+        return null; // Sinaliza falha para o orchestrator ativar o Fallback
     }
 }

@@ -43,7 +43,7 @@ import { ai, GEMINI_MODEL } from '../lib/gemini.js';
 // ── Skills importadas (Fase 1 de Modularização) ──────────────────────────────
 import { buscarProdutosSimilares, ingeriCatalogo, atualizarPrecoLedger, retirarEstoqueLedger, gerarEmbedding } from './skills/catalog-ledger.js';
 import { obterEstatisticas, criarOferta, buscarOfertasAtivas } from './skills/store-services.js';
-import { detectarFugaNLP, detectarIntencaoProativa } from './skills/intent-detector.js';
+import { detectarFugaNLP, detectarIntencaoProativa, refinarCandidatosBusca } from './skills/intent-detector.js';
 import { processarRevisaoPrecos, calcularSeloFrescor } from './skills/revisor.js';
 import { processarMidia, processLoteProdutos, formatarCartaoProduto } from './skills/vision-processor.js';
 // ─────────────────────────────────────────────────────────────────────────────
@@ -950,13 +950,24 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                     const { data: ofertasSemanticas, error: errorSemantico } = await supabase.rpc('buscar_ofertas_semantico', {
                         p_estado: contexto!.dadosConsumidor?.estado || 'PA',
                         p_query_embedding: vetorBusca,
-                        p_match_threshold: 0.68,
-                        p_limit: 30
+                        p_match_threshold: 0.6, // Mais permissivo para o Gemini poder escolher
+                        p_limit: 15
                     });
 
-                    if (!errorSemantico && ofertasSemanticas) {
-                        ofertas = ofertasSemanticas;
-                        logger.info({ encontradas: ofertas.length }, '[Motor Semântico] Retornou resultados');
+                    if (!errorSemantico && ofertasSemanticas && ofertasSemanticas.length > 0) {
+                        logger.info({ retornadas: ofertasSemanticas.length }, '[Motor Semântico] Submetendo ao Reranking do Gemini');
+                        
+                        const idsValidos = await refinarCandidatosBusca(termoBusca, ofertasSemanticas);
+                        
+                        if (idsValidos !== null) {
+                            // Reranking funcionou: Fica apenas com o que o Gemini aprovou
+                            ofertas = ofertasSemanticas.filter(of => idsValidos.includes(of.id));
+                            logger.info({ aprovadas: ofertas.length }, '[Motor Semântico] Reranking concluído');
+                        } else {
+                            // Falha no Reranking: Fallback conservador (apenas similaridade alta >= 0.7)
+                            ofertas = ofertasSemanticas.filter(of => of.similarity >= 0.7);
+                            logger.warn({ aprovadasConservadoras: ofertas.length }, '[Motor Semântico] Fallback Conservador ativado devido a erro na IA');
+                        }
                     } else if (errorSemantico) {
                         logger.error({ errorSemantico }, '[Motor Semântico] Erro no RPC');
                     }
