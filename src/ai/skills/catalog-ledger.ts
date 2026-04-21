@@ -17,7 +17,7 @@ import { DadosProduto } from '../types.js';
 export async function gerarEmbedding(texto: string): Promise<number[] | null> {
     try {
         const result = await ai.models.embedContent({
-            model: 'text-embedding-004',
+            model: 'gemini-embedding-001',
             contents: texto,
         });
         // O Supabase PostgREST aceita arrays regulares de números para campos pgvector
