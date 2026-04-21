@@ -12,6 +12,23 @@ import { IndicesSimilaresSchema, parseSafe } from '../schemas.js';
 import { DadosProduto } from '../types.js';
 
 // ============================================================
+// HELPER: Geração de Embeddings
+// ============================================================
+export async function gerarEmbedding(texto: string): Promise<number[] | null> {
+    try {
+        const result = await ai.models.embedContent({
+            model: 'text-embedding-004',
+            contents: texto,
+        });
+        // O Supabase PostgREST aceita arrays regulares de números para campos pgvector
+        return result.embeddings?.[0]?.values ?? null;
+    } catch (e) {
+        logger.error({ e, texto }, '[Embedding] Erro ao gerar vetor');
+        return null;
+    }
+}
+
+// ============================================================
 // BUSCA DE SIMILARES (pg_trgm + Gemini semântico)
 // ============================================================
 
@@ -131,6 +148,9 @@ export async function ingeriCatalogo(lojaId: string, produto: DadosProduto, font
         return { inserido: false };
     }
 
+    const textoParaVetor = `${nomeSeguro} ${unidadeSegura}`.trim();
+    const vetorInfo = await gerarEmbedding(textoParaVetor);
+
     const { data: upserted, error: upsertError } = await supabase
         .from('catalogo_ativo')
         .upsert(
@@ -142,6 +162,7 @@ export async function ingeriCatalogo(lojaId: string, produto: DadosProduto, font
                 disponivel:     true,
                 fonte_ingestao: fonte,
                 atualizado_em:  new Date().toISOString(),
+                ...(vetorInfo ? { embedding: vetorInfo } : {})
             },
             { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
         )
@@ -184,6 +205,9 @@ export async function atualizarPrecoLedger(lojaId: string, produtoNome: string, 
     const precoSeguro   = Number(novoPreco) || 0;
     const agora         = new Date().toISOString();
 
+    const textoParaVetor = `${nomeSeguro} ${unidadeSegura}`.trim();
+    const vetorInfo = await gerarEmbedding(textoParaVetor);
+
     let upserted: { id: string } | null = null;
 
     const { data: tentativa1, error: erro1 } = await supabase
@@ -197,6 +221,7 @@ export async function atualizarPrecoLedger(lojaId: string, produtoNome: string, 
                 disponivel:     true,
                 fonte_ingestao: 'manual',
                 atualizado_em:  agora,
+                ...(vetorInfo ? { embedding: vetorInfo } : {})
             },
             { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
         )
@@ -216,6 +241,7 @@ export async function atualizarPrecoLedger(lojaId: string, produtoNome: string, 
                     disponivel:     true,
                     fonte_ingestao: 'manual',
                     atualizado_em:  agora,
+                    ...(vetorInfo ? { embedding: vetorInfo } : {})
                 },
                 { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
             )

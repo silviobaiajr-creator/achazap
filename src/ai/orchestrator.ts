@@ -41,7 +41,7 @@ import {
 import { ai, GEMINI_MODEL } from '../lib/gemini.js';
 
 // ── Skills importadas (Fase 1 de Modularização) ──────────────────────────────
-import { buscarProdutosSimilares, ingeriCatalogo, atualizarPrecoLedger, retirarEstoqueLedger } from './skills/catalog-ledger.js';
+import { buscarProdutosSimilares, ingeriCatalogo, atualizarPrecoLedger, retirarEstoqueLedger, gerarEmbedding } from './skills/catalog-ledger.js';
 import { obterEstatisticas, criarOferta, buscarOfertasAtivas } from './skills/store-services.js';
 import { detectarFugaNLP, detectarIntencaoProativa } from './skills/intent-detector.js';
 import { processarRevisaoPrecos, calcularSeloFrescor } from './skills/revisor.js';
@@ -931,15 +931,39 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             await sendTextMessage(from, `🔍 Procurando as opções de *${termoBusca}* mais baratas e próximas de você em ${contexto!.dadosConsumidor?.bairro}...`);
             await delay(1500);
 
-            // Fetch DB `buscar_ofertas` RPC
-            const { data: ofertas, error } = await supabase.rpc('buscar_ofertas', {
+            // Fetch DB `buscar_ofertas` RPC (Tradicional)
+            const { data: ofertasTextuais, error } = await supabase.rpc('buscar_ofertas', {
                 p_cidade: contexto!.dadosConsumidor?.cidade,
                 p_bairro: contexto!.dadosConsumidor?.bairro,
                 p_estado: contexto!.dadosConsumidor?.estado || 'PA',
                 p_query: termoBusca
             });
 
-            if (error || !ofertas || ofertas.length === 0) {
+            let ofertas = ofertasTextuais || [];
+
+            // Peneira Automática: Se a busca exata falhar, tenta Busca Semântica
+            if (ofertas.length === 0) {
+                logger.info({ termoBusca, estado: contexto!.dadosConsumidor?.estado }, '[Motor Semântico] Fallback ativado para busca do consumidor');
+                const vetorBusca = await gerarEmbedding(termoBusca);
+                
+                if (vetorBusca) {
+                    const { data: ofertasSemanticas, error: errorSemantico } = await supabase.rpc('buscar_ofertas_semantico', {
+                        p_estado: contexto!.dadosConsumidor?.estado || 'PA',
+                        p_query_embedding: vetorBusca,
+                        p_match_threshold: 0.5,
+                        p_limit: 30
+                    });
+
+                    if (!errorSemantico && ofertasSemanticas) {
+                        ofertas = ofertasSemanticas;
+                        logger.info({ encontradas: ofertas.length }, '[Motor Semântico] Retornou resultados');
+                    } else if (errorSemantico) {
+                        logger.error({ errorSemantico }, '[Motor Semântico] Erro no RPC');
+                    }
+                }
+            }
+
+            if (!ofertas || ofertas.length === 0) {
                 await sendTextMessage(from, '😕 Poxa, ainda não encontrei nenhuma loja com essa oferta na sua região. Tente buscar outro produto!');
                 return;
             }
