@@ -17,6 +17,7 @@ WITH (m = 16, ef_construction = 64);
 
 -- 4. Criar RPC especializado para a Busca Semântica do Consumidor
 -- Recebe o embedding do termo do usuário e filtra por estado
+DROP FUNCTION IF EXISTS public.buscar_ofertas_semantico(text, vector, float, int);
 CREATE OR REPLACE FUNCTION public.buscar_ofertas_semantico(
     p_estado text,
     p_query_embedding vector(768),
@@ -69,6 +70,7 @@ $$;
 
 -- 5. Criar RPC especializado para Deduplicação Interna do Lojista
 -- Útil ao enviar uma imagem para saber se o produto já existe no estoque daquela loja
+DROP FUNCTION IF EXISTS public.buscar_similares_semantico(uuid, vector, float, int);
 CREATE OR REPLACE FUNCTION public.buscar_similares_semantico(
     p_loja_id uuid,
     p_query_embedding vector(768),
