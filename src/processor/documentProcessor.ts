@@ -7,6 +7,7 @@ import { sendTextMessage, downloadMedia, sendInteractiveButtons } from '../lib/w
 import { parseSafe } from '../ai/schemas.js';
 import { pool } from '../lib/db.js';
 import { limparContexto } from '../lib/redis-cloud.js';
+import { decomporProduto } from '../ai/skills/catalog-ledger.js';
 
 // ─── Constantes de Segurança ──────────────────────────────────────────────────
 const CHUNK_SIZE         = 5000;
@@ -151,17 +152,20 @@ export async function processarDocumento(msg: any, from: string, loja: any, _con
             return;
         }
 
-        // Mapeamento Gemini
+        // Mapeamento Gemini: identifica colunas E decompõe os dados nas 6 camadas
         const amostraSanitizada = sanitizeSample(amostraParaGemini);
-        const promptMapeamento = `Você é um engenheiro de dados. Identifique as colunas de um arquivo de produtos.
+        const promptMapeamento = `Você é um engenheiro de dados de supermercado. Analise a amostra de arquivo de produtos abaixo.
 Amostra:
 ${amostraSanitizada}
 
-Retorne APENAS JSON:
-- coluna_nome (obrigatório)
-- coluna_preco (obrigatório)
-- coluna_unidade (opcional)
-- coluna_sku (opcional)
+Tarefa 1 — Identificar as colunas do arquivo:
+- coluna_nome (obrigatório): coluna que contém o nome do produto
+- coluna_preco (obrigatório): coluna que contém o preço
+- coluna_unidade (opcional): coluna que contém a unidade (kg, un, etc.)
+- coluna_sku (opcional): coluna que contém o código SKU
+
+Retorne APENAS JSON com esses 4 campos:
+{"coluna_nome":"...","coluna_preco":"...","coluna_unidade":null,"coluna_sku":null}
 
 JSON:`;
 
@@ -286,25 +290,44 @@ JSON:`;
                         }
                     }
 
-                    if (linhasNovas.length > 0) {
+                    // Decompõe os novos produtos em 6 camadas em paralelo (antes de gravar)
+                    const linhasComCamadas = await Promise.all(
+                        linhasNovas.map(async (row) => {
+                            const camadas = await decomporProduto(row[1]); // row[1] = produto_nome
+                            return { row, camadas };
+                        })
+                    );
+
+                    if (linhasComCamadas.length > 0) {
                         await client.query('BEGIN');
 
                         // ── UPSERT em catalogo_ativo (snapshot por produto) ──────────────
-                        const ativoPlaceholders = linhasNovas.map((_, i) =>
-                            `($${i*6+1},$${i*6+2},$${i*6+3},$${i*6+4},$${i*6+5},$${i*6+6})`
+                        const ativoPlaceholders = linhasComCamadas.map((_, i) =>
+                            `($${i*11+1},$${i*11+2},$${i*11+3},$${i*11+4},$${i*11+5},$${i*11+6},$${i*11+7},$${i*11+8},$${i*11+9},$${i*11+10},$${i*11+11})`
                         ).join(', ');
+                        const flatValues = linhasComCamadas.flatMap(({ row, camadas }) => [
+                            row[0], row[1], row[2], row[3], row[4], row[5], // loja_id, nome, sku, preco, unidade, fonte
+                            camadas.membro_core, camadas.marca, camadas.especificacao, camadas.unidade_medida,
+                            camadas.metadados ? JSON.stringify(camadas.metadados) : null,
+                        ]);
                         const { rows: upsertedRows } = await client.query<{ id: string; produto_nome: string; produto_sku: string | null }>(
                             `INSERT INTO catalogo_ativo
-                                 (loja_id, produto_nome, produto_sku, preco, unidade, fonte_ingestao)
+                                 (loja_id, produto_nome, produto_sku, preco, unidade, fonte_ingestao,
+                                  membro_core, marca, especificacao, unidade_medida, metadados)
                              VALUES ${ativoPlaceholders}
                              ON CONFLICT (loja_id, produto_nome) DO UPDATE
                                  SET preco = EXCLUDED.preco,
                                      unidade = EXCLUDED.unidade,
                                      disponivel = true,
                                      fonte_ingestao = EXCLUDED.fonte_ingestao,
+                                     membro_core = EXCLUDED.membro_core,
+                                     marca = EXCLUDED.marca,
+                                     especificacao = EXCLUDED.especificacao,
+                                     unidade_medida = EXCLUDED.unidade_medida,
+                                     metadados = EXCLUDED.metadados,
                                      atualizado_em = now()
                              RETURNING id, produto_nome, produto_sku`,
-                            linhasNovas.flat()
+                            flatValues
                         );
 
                         // ── INSERT de auditoria em catalogo_historico ───────────────────

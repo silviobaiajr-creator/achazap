@@ -911,17 +911,23 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 return;
             }
 
-            let listaDeBusca = await extrairListaCompras(userMessageText);
-            
-            await sendTextMessage(from, `🔍 Procurando as opções de *${listaDeBusca.join(', ')}* mais baratas e próximas de você em ${contexto!.dadosConsumidor?.bairro}...`);
+            const listaIntencao = await extrairListaCompras(userMessageText);
+            const nomesItens = listaIntencao.map(i => i.item).join(', ');
+
+            await sendTextMessage(from, `🔍 Procurando *${nomesItens}* mais baratos e próximos de você em ${contexto!.dadosConsumidor?.bairro}...`);
             await delay(1500);
 
-            let todosEncontrados: any[] = [];
-            let itensNaoEncontrados: string[] = [];
+            // ── Fase 1: Busca silenciosa para todos os itens ────────────────
+            const itensAchados: Array<{ intencao: typeof listaIntencao[0]; oferta: any }> = [];
+            const itensAmbiguos: Array<{ intencao: typeof listaIntencao[0]; opcoes: any[] }> = [];
+            const itensNaoEncontrados: string[] = [];
 
-            for (const termoBusca of listaDeBusca) {
-                // Fetch DB `buscar_ofertas` RPC (Tradicional)
-                const { data: ofertasTextuais, error } = await supabase.rpc('buscar_ofertas', {
+            for (const intencao of listaIntencao) {
+                // Monta o termo de busca combinando item + atributos conhecidos do consumidor
+                const termoBusca = [intencao.item, intencao.marca, intencao.especificacao, intencao.tamanho]
+                    .filter(Boolean).join(' ').trim();
+
+                const { data: ofertasTextuais } = await supabase.rpc('buscar_ofertas', {
                     p_cidade: contexto!.dadosConsumidor?.cidade,
                     p_bairro: contexto!.dadosConsumidor?.bairro,
                     p_estado: contexto!.dadosConsumidor?.estado || 'PA',
@@ -930,7 +936,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
                 let ofertas = ofertasTextuais || [];
 
-                // 1. Reranking na Busca Textual (Evita falso positivo do "Sorvete de Tapioca" na busca de "Tapioca")
+                // Reranking textual
                 if (ofertas.length > 0) {
                     const idsValidos = await refinarCandidatosBusca(termoBusca, ofertas);
                     if (idsValidos !== null) {
@@ -938,100 +944,114 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                     }
                 }
 
-                // 2. Fallback Semântico: Se falhar ou a IA vetar todos os textuais
+                // Fallback semântico
                 if (ofertas.length === 0) {
-                    logger.info({ termoBusca, estado: contexto!.dadosConsumidor?.estado }, '[Motor Semântico] Fallback ativado para busca do consumidor');
                     const vetorBusca = await gerarEmbedding(termoBusca);
-                    
                     if (vetorBusca) {
-                        const { data: ofertasSemanticas, error: errorSemantico } = await supabase.rpc('buscar_ofertas_semantico', {
+                        const { data: ofertasSemanticas, error: erroSem } = await supabase.rpc('buscar_ofertas_semantico', {
                             p_estado: contexto!.dadosConsumidor?.estado || 'PA',
                             p_query_embedding: vetorBusca,
-                            p_match_threshold: 0.6, // Mais permissivo para o Gemini poder escolher
+                            p_match_threshold: 0.6,
                             p_limit: 15
                         });
-
-                        if (!errorSemantico && ofertasSemanticas && ofertasSemanticas.length > 0) {
-                            logger.info({ retornadas: ofertasSemanticas.length }, '[Motor Semântico] Submetendo ao Reranking do Gemini');
-                            
+                        if (!erroSem && ofertasSemanticas && ofertasSemanticas.length > 0) {
                             const idsValidos = await refinarCandidatosBusca(termoBusca, ofertasSemanticas);
-                            
                             if (idsValidos !== null) {
-                                // Reranking funcionou: Fica apenas com o que o Gemini aprovou
                                 ofertas = ofertasSemanticas.filter((of: any) => idsValidos.includes(of.id));
-                                logger.info({ aprovadas: ofertas.length }, '[Motor Semântico] Reranking concluído');
                             } else {
-                                // Falha no Reranking: Fallback conservador (apenas similaridade alta >= 0.7)
                                 ofertas = ofertasSemanticas.filter((of: any) => of.similarity >= 0.7);
-                                logger.warn({ aprovadasConservadoras: ofertas.length }, '[Motor Semântico] Fallback Conservador ativado devido a erro na IA');
                             }
-                        } else if (errorSemantico) {
-                            logger.error({ errorSemantico }, '[Motor Semântico] Erro no RPC');
                         }
                     }
                 }
 
-                if (ofertas && ofertas.length > 0) {
-                    // Adiciona a melhor oferta deste item à lista mista
-                    todosEncontrados.push(ofertas[0]); 
-                } else {
-                    itensNaoEncontrados.push(termoBusca);
+                if (ofertas.length === 0) {
+                    itensNaoEncontrados.push(intencao.item);
+                    continue;
                 }
-            } // end loop
 
-            if (todosEncontrados.length === 0) {
-                await sendTextMessage(from, `😕 Poxa, não encontrei nenhum dos itens da sua lista na sua região. Tente buscar outros produtos!`);
+                // ── Classifica: Certeza (1 opção) vs. Ambiguidade (várias marcas/specs) ──
+                // Agrupa por membro_core para detectar variantes da mesma categoria
+                const gruposMarca = new Map<string, any>();
+                for (const of_ of ofertas) {
+                    const chave = (of_.produto_nome || '').toLowerCase();
+                    if (!gruposMarca.has(chave)) gruposMarca.set(chave, of_);
+                }
+                const variantesUnicas = Array.from(gruposMarca.values());
+
+                // Se o consumidor já especificou marca/spec OU disse que "qualquer" marca serve: é certeza
+                const jaEspecificou = intencao.marca || intencao.especificacao || intencao.tamanho || intencao.qualquer_marca;
+                
+                if (variantesUnicas.length === 1 || jaEspecificou) {
+                    itensAchados.push({ intencao, oferta: variantesUnicas[0] });
+                } else if (variantesUnicas.length > 1) {
+                    // Múltiplas variantes sem preferência expressa: ambiguidade
+                    itensAmbiguos.push({ intencao, opcoes: variantesUnicas.slice(0, 3) });
+                }
+            }
+
+            // ── Fase 2: Mensagem de resposta com Achados primeiro ───────────
+            if (itensAchados.length === 0 && itensAmbiguos.length === 0) {
+                await sendTextMessage(from, `😕 Poxa, não encontrei nenhum dos itens na sua região. Tente buscar outros produtos!`);
                 return;
             }
 
-            // Ordena os itens encontrados pelo preço (opcional) e pega top 3 misto da cesta
-            todosEncontrados.sort((a, b) => Number(a.preco_atual) - Number(b.preco_atual));
-            const top3 = todosEncontrados.slice(0, 3);
-            
-            let msgBusca = `🎯 *Encontrei opções para sua lista!*\n\nVeja as melhores escolhas:\n\n`;
+            let msgBusca = '';
 
-            for (let i = 0; i < top3.length; i++) {
-                const offer = top3[i];
-                
-                // Cross sell: check if loja has active offers
-                const { data: promocoes } = await supabase
-                    .from('ofertas_desconto')
-                    .select('*')
-                    .eq('loja_id', offer.loja_id)
-                    .eq('ativa', true)
-                    .gte('validade', new Date().toISOString());
-
-                let promoText = '';
-                if (promocoes && promocoes.length > 0) {
-                    promoText = `\n🎁 *Promo da Loja:* Ganhe ${Number(promocoes[0].percentual)}% OFF comprando mais de R$ ${promocoes[0].valor_minimo}`;
+            // Bloco de certezas
+            if (itensAchados.length > 0) {
+                msgBusca += `🎯 *Encontrei ${itensAchados.length} item(s) na sua região!*\n\n`;
+                for (const { oferta } of itensAchados) {
+                    // Cross-sell: promoções da loja
+                    const { data: promocoes } = await supabase
+                        .from('ofertas_desconto').select('*')
+                        .eq('loja_id', oferta.loja_id).eq('ativa', true)
+                        .gte('validade', new Date().toISOString());
+                    const promoText = (promocoes && promocoes.length > 0)
+                        ? `\n🎁 Promo: ${Number(promocoes[0].percentual)}% OFF acima de R$ ${promocoes[0].valor_minimo}`
+                        : '';
+                    msgBusca += `🥇 *${oferta.produto_nome}*: R$ ${Number(oferta.preco_atual).toFixed(2).replace('.', ',')} / ${oferta.unidade}${promoText}\n\n`;
                 }
-
-                msgBusca += `🥇 *Opção ${i+1}:* *${offer.produto_nome}* por R$ ${Number(offer.preco_atual).toFixed(2).replace('.',',')} / ${offer.unidade}\n`;
-                msgBusca += `📍 *Distância:* Aprox. ${(Math.random() * 3 + 0.5).toFixed(1)} km`; // Mock de distancia temporário
-                msgBusca += promoText ? `${promoText}\n\n` : `\n\n`;
             }
 
+            // Itens não encontrados
             if (itensNaoEncontrados.length > 0) {
-                msgBusca += `😕 *Em falta hoje:* Apenas não encontrei ofertas para ${itensNaoEncontrados.join(', ')}.\n\n`;
+                msgBusca += `😕 *Não encontrei hoje:* ${itensNaoEncontrados.join(', ')}\n\n`;
             }
-            
-            msgBusca += `👀 Deseja revelar a loja de qual opção? (Isso gasta créditos do lojista, seja consciente!)`;
 
-            // Fix dos Botões: Gera dinamicamente N botões baseado no array (máximo 3 já garantido pelo slice)
-            const botoes = top3.map((offer, idx) => ({
-                id: `revelar_${offer.id}_${offer.loja_id}`,
-                title: `🔓 Revelar Op. ${idx + 1}`
-            }));
+            // Bloco de ambiguidade (sempre no final)
+            if (itensAmbiguos.length > 0) {
+                msgBusca += `🤔 *Para completar sua lista, o que você prefere?*\n`;
+                for (const { intencao, opcoes } of itensAmbiguos) {
+                    const nomes = opcoes.map(o => `*${o.produto_nome}*`).join(' ou ');
+                    msgBusca += `• Para o *${intencao.item}*, tem ${nomes}?\n`;
+                }
+            }
 
-            await sendInteractiveButtons(from, msgBusca, botoes);
+            // Botões de revelar apenas para os itens achados com certeza
+            if (itensAchados.length > 0) {
+                const top3 = itensAchados.slice(0, 3);
+                const botoes = top3.map(({ oferta }, idx) => ({
+                    id: `revelar_${oferta.id}_${oferta.loja_id}`,
+                    title: `🔓 Revelar Op. ${idx + 1}`
+                }));
+                if (itensAmbiguos.length === 0) {
+                    msgBusca += `👀 Deseja revelar a loja de qual opção? (Isso gasta créditos do lojista!)`;
+                }
+                await sendInteractiveButtons(from, msgBusca, botoes);
+            } else {
+                // Só há ambiguidade — envia texto sem botões de revelar
+                await sendTextMessage(from, msgBusca.trim());
+            }
             return;
         }
-        
+
         await sendTextMessage(from, 'O que você está procurando hoje? Pode digitar ex: "Pizza", "Leite", etc.');
         return;
     }
 
     // ══════════════════════════════════════════════════════════
+
     // INTERCEPTADOR DE DOCUMENTOS (CSV/Excel) - Sprint 14
     // ══════════════════════════════════════════════════════════
     if (msg.type === 'document') {

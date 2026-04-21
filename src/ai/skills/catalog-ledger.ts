@@ -1,8 +1,8 @@
 /**
  * Skill: catalog-ledger
  * Responsabilidade: Todas as operações de leitura e escrita no catálogo de produtos.
- * Inclui busca de similares (pg_trgm + Gemini semântico), inserção (UPSERT),
- * atualização de preço e soft-delete via ledger append-only.
+ * Inclui busca de similares (pgvector semântico), inserção (UPSERT) com 6 camadas
+ * de precisão, atualização de preço e soft-delete via ledger append-only.
  */
 
 import { supabaseAdmin as supabase } from '../../lib/supabase.js';
@@ -10,6 +10,7 @@ import { ai, GEMINI_MODEL } from '../../lib/gemini.js';
 import { logger, logTokens } from '../../lib/logger.js';
 import { IndicesSimilaresSchema, parseSafe } from '../schemas.js';
 import { DadosProduto } from '../types.js';
+import { z } from 'zod';
 
 // ============================================================
 // HELPER: Geração de Embeddings
@@ -30,88 +31,126 @@ export async function gerarEmbedding(texto: string): Promise<number[] | null> {
 }
 
 // ============================================================
-// BUSCA DE SIMILARES (pg_trgm + Gemini semântico)
+// DECOMPOSIÇÃO EM 6 CAMADAS DE PRECISÃO
+// ============================================================
+
+interface Camadas6 {
+    membro_core: string | null;
+    marca: string | null;
+    especificacao: string | null;
+    unidade_medida: string | null;
+    metadados: Record<string, any> | null;
+}
+
+const Camadas6Schema = z.object({
+    membro_core:    z.string().nullable().optional(),
+    marca:          z.string().nullable().optional(),
+    especificacao:  z.string().nullable().optional(),
+    unidade_medida: z.string().nullable().optional(),
+    metadados:      z.record(z.any()).nullable().optional(),
+});
+
+/**
+ * Usa o Gemini para decompor o nome de um produto em 6 camadas estruturadas.
+ * Isso mantém o banco de dados organizado e permite buscas semânticas precisas.
+ * Exemplo: "Café Santa Clara Vácuo 250g" →
+ *   { membro_core: "Café", marca: "Santa Clara", especificacao: "Vácuo", unidade_medida: "250g", metadados: null }
+ */
+export async function decomporProduto(nomeProduto: string): Promise<Camadas6> {
+    const fallback: Camadas6 = { membro_core: nomeProduto, marca: null, especificacao: null, unidade_medida: null, metadados: null };
+    try {
+        const result = await ai.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: `Você é um analista de dados de supermercado. Decomponha o nome do produto abaixo em 5 atributos.
+Nome: "${nomeProduto}"
+
+Regras:
+- membro_core: O nome genérico do produto (ex: "Arroz", "Café", "Sabão em Pó"). Obrigatório.
+- marca: A marca comercial, se houver (ex: "Tio João", "Santa Clara"). Null se não houver.
+- especificacao: Tipo ou preparo (ex: "Integral", "Vácuo", "Cristal", "Líquido"). Null se não houver.
+- unidade_medida: Peso ou volume com a unidade (ex: "5kg", "250g", "1L"). Null se não houver.
+- metadados: Objeto JSON com tags extras relevantes (ex: {"tags":["Orgânico","Gourmet"]}). Null se não houver.
+
+Retorne APENAS um JSON com esses 5 campos:
+{"membro_core":"...","marca":null,"especificacao":null,"unidade_medida":null,"metadados":null}`,
+            config: { responseMimeType: 'application/json', temperature: 0.0 },
+        });
+        logTokens('decompor_produto_6camadas', 'system', 'system', result.usageMetadata);
+        const dados = parseSafe(Camadas6Schema, result.text || '{}', {});
+        return {
+            membro_core:    dados.membro_core    ?? fallback.membro_core,
+            marca:          dados.marca          ?? null,
+            especificacao:  dados.especificacao  ?? null,
+            unidade_medida: dados.unidade_medida ?? null,
+            metadados:      dados.metadados      ?? null,
+        };
+    } catch (e) {
+        logger.warn({ e, nomeProduto }, '[Ledger] Erro na decomposição — usando fallback');
+        return fallback;
+    }
+}
+
+// ============================================================
+// BUSCA DE SIMILARES (pgvector semântico)
 // ============================================================
 
 /**
- * Busca produtos similares:
- * 1ª peneira: pg_trgm (matemática, rápida, barata)
- * 2ª peneira: Gemini (semântica) sobre o conjunto reduzido
- * Fallback: varredura total se pg_trgm não estiver ativo (graceful degradation)
+ * Busca produtos similares dentro do estoque de uma loja.
+ * Motor: pgvector (busca_similares_semantico) — detecta intenção pelo SIGNIFICADO.
+ * Fallback: full-scan se o embedding não estiver disponível.
  */
 export async function buscarProdutosSimilares(
     lojaId: string,
     termoBusca: string
 ): Promise<Array<{ id: string; produto_nome: string; preco: number; unidade: string }>> {
 
-    let candidatos: any[] = [];
-
-    // ── Etapa 1: Peneira matemática via pg_trgm RPC ──
-    try {
-        const { data: trgmData, error: trgmError } = await supabase
-            .rpc('buscar_produtos_similares', {
-                p_loja_id:   lojaId,
-                p_termo:     termoBusca,
-                p_threshold: 0.15,
+    // ── Etapa 1: Busca vetorial (semântica) ──
+    const vetor = await gerarEmbedding(termoBusca);
+    if (vetor) {
+        const { data: semanticos, error } = await supabase
+            .rpc('buscar_similares_semantico', {
+                p_loja_id:         lojaId,
+                p_query_embedding: vetor,
+                p_match_threshold: 0.6,
+                p_limit:           10,
             });
 
-        if (!trgmError && trgmData && trgmData.length > 0) {
-            candidatos = trgmData;
-            logger.info({ lojaId, termoBusca, candidatos: candidatos.length }, '[Similares] pg_trgm retornou candidatos');
-        } else if (trgmError) {
-            logger.warn({ err: trgmError.message }, '[Similares] pg_trgm indisponível, usando full-scan');
+        if (!error && semanticos && semanticos.length > 0) {
+            logger.info({ lojaId, termoBusca, total: semanticos.length }, '[Similares] Motor vetorial retornou candidatos');
+            return semanticos;
         }
-    } catch (err) {
-        logger.warn({ err }, '[Similares] Erro no pg_trgm, degradando para full-scan');
+        if (error) logger.warn({ err: error.message }, '[Similares] Erro no motor vetorial, usando full-scan');
     }
 
     // ── Fallback: full-scan em catalogo_ativo ──
-    if (candidatos.length === 0) {
-        const { data, error } = await supabase
-            .from('catalogo_ativo')
-            .select('id, produto_nome, preco, unidade, atualizado_em')
-            .eq('loja_id', lojaId)
-            .eq('disponivel', true);
+    const { data, error: scanError } = await supabase
+        .from('catalogo_ativo')
+        .select('id, produto_nome, preco, unidade')
+        .eq('loja_id', lojaId)
+        .eq('disponivel', true);
 
-        if (error || !data || data.length === 0) return [];
-        candidatos = data;
-        logger.info({ lojaId, totalProdutos: candidatos.length }, '[Similares] Full-scan em catalogo_ativo ativado');
-    }
+    if (scanError || !data || data.length === 0) return [];
+    logger.info({ lojaId, total: data.length }, '[Similares] Full-scan ativado');
 
-    if (candidatos.length === 0) return [];
-
-    // ── Etapa 2: Lupa semântica Gemini sobre os candidatos ──
-    const catalogList = candidatos
-        .map((p: any, i: number) => `${i + 1}. ${p.produto_nome} (R$ ${p.preco} / ${p.unidade})`)
+    // Filtra os candidatos do full-scan via Gemini
+    const catalogList = data
+        .map((p, i) => `${i + 1}. ${p.produto_nome} (R$ ${p.preco} / ${p.unidade})`)
         .join('\n');
 
     try {
         const result = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: `Você é um analista estrito de similaridade de produtos.
-Produto buscado: "${termoBusca}"
-
-Encontre na lista abaixo quais itens são o MESMO PRODUTO que o buscado.
-- Considere erros ortográficos comuns em WhatsApp (ex: "Aros" e "Arroz", "Mussa" e "Muçarela").
-- Considere sinônimos ou abreviações CLARAS (ex: "Refri" e "Refrigerante", "Massa" e "Macarrão").
-- CUIDADO: Falsos positivos são intoleráveis. Se o produto for de tipo diferente, NÃO TEM SIMILARIDADE.
-- Retorne APENAS um array JSON de índices (começando em 1) com as correspondências encontradas.
-- Se não houver NENHUM correspondente seguro, retorne um array vazio: []
-
-Catálogo:
-${catalogList}
-
-JSON:`,
+            contents: `Produto buscado: "${termoBusca}". Qual dos itens abaixo é o MESMO produto?
+Catálogo:\n${catalogList}\nRetorne APENAS um array JSON de índices (começando em 1), ou [] se nenhum for igual.`,
             config: { responseMimeType: 'application/json' },
         });
-        logTokens('buscar_similares_gemini', lojaId, lojaId, result.usageMetadata);
-
+        logTokens('buscar_similares_fullscan_gemini', lojaId, lojaId, result.usageMetadata);
         const indices = parseSafe(IndicesSimilaresSchema, result.text || '[]', []);
         return indices
-            .filter((idx: number) => idx >= 1 && idx <= candidatos.length)
-            .map((idx: number) => candidatos[idx - 1]);
+            .filter((idx: number) => idx >= 1 && idx <= data.length)
+            .map((idx: number) => data[idx - 1]);
     } catch (e) {
-        logger.error({ e }, '[Similares] Erro no Gemini semântico');
+        logger.error({ e }, '[Similares] Erro no Gemini do full-scan');
         return [];
     }
 }
@@ -149,8 +188,12 @@ export async function ingeriCatalogo(lojaId: string, produto: DadosProduto, font
         return { inserido: false };
     }
 
+    // Enriquecimento em paralelo: embedding + decomposição 6 camadas
     const textoParaVetor = `${nomeSeguro} ${unidadeSegura}`.trim();
-    const vetorInfo = await gerarEmbedding(textoParaVetor);
+    const [vetorInfo, camadas] = await Promise.all([
+        gerarEmbedding(textoParaVetor),
+        decomporProduto(nomeSeguro),
+    ]);
 
     const { data: upserted, error: upsertError } = await supabase
         .from('catalogo_ativo')
@@ -163,6 +206,12 @@ export async function ingeriCatalogo(lojaId: string, produto: DadosProduto, font
                 disponivel:     true,
                 fonte_ingestao: fonte,
                 atualizado_em:  new Date().toISOString(),
+                // 6 camadas de precisão
+                membro_core:    camadas.membro_core,
+                marca:          camadas.marca,
+                especificacao:  camadas.especificacao,
+                unidade_medida: camadas.unidade_medida,
+                metadados:      camadas.metadados,
                 ...(vetorInfo ? { embedding: vetorInfo } : {})
             },
             { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }
@@ -183,6 +232,11 @@ export async function ingeriCatalogo(lojaId: string, produto: DadosProduto, font
         unidade:        unidadeSegura,
         disponivel:     true,
         fonte_ingestao: fonte,
+        membro_core:    camadas.membro_core,
+        marca:          camadas.marca,
+        especificacao:  camadas.especificacao,
+        unidade_medida: camadas.unidade_medida,
+        metadados:      camadas.metadados,
     });
 
     return { inserido: true };

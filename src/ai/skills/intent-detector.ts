@@ -92,46 +92,68 @@ Retorne EXCLUSIVAMENTE um JSON com este formato:
     }
 }
 
+// ============================================================
+// EXTRAÇÃO DE INTENÇÃO ESTRUTURADA (Lista de Compras Inteligente)
+// ============================================================
+
+export interface ItemIntencao {
+    item: string;
+    marca?: string | null;
+    especificacao?: string | null;
+    tamanho?: string | null;
+    qualquer_marca?: boolean; // Se o usuário disse "qualquer", "mais barato", "não importa a marca"
+}
+
+const ItemIntencaoSchema = z.object({
+    item:           z.string(),
+    marca:          z.string().nullable().optional(),
+    especificacao:  z.string().nullable().optional(),
+    tamanho:        z.string().nullable().optional(),
+    qualquer_marca: z.boolean().default(false),
+});
+const ListaIntencaoSchema = z.object({ itens: z.array(ItemIntencaoSchema) });
+
 /**
- * Função NLP para o Modo Lista de Compras.
- * Lê a mensagem do usuário e separa em itens de consumo unificados.
+ * Extrai uma lista de intenções estruturadas da mensagem do consumidor.
  */
-export async function extrairListaCompras(texto: string): Promise<string[]> {
+export async function extrairListaCompras(texto: string): Promise<ItemIntencao[]> {
     if (!texto || texto.trim().length === 0) return [];
 
     try {
         const result = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: `Você é uma IA extratora de ingredientes e listas de compras.
-O usuário digitou: "${texto}"
+            contents: `Você é um assistente de lista de compras. Analise a mensagem e extraia cada produto com seus atributos.
+Mensagem: "${texto}"
 
-Objetivo:
-- Analise se a frase contém um ou múltiplos produtos (itens de supermercado, comida, bebida, mercearia, etc).
-- Para cada produto encontrado, crie uma string simples contendo as palavras-chave principais do item e guarde numa array.
-- Exemplo 1: "Tem café, açúcar e 1 pacote de macarrão?" -> ["café", "açúcar", "pacote de macarrão"]
-- Exemplo 2: "Me dá um quilo de feijão preto" -> ["feijão preto"]
-- Exemplo 3: "Quero tomar um café com leite com tapioca e pão quentinho" -> ["café com leite", "tapioca", "pão"] ou ["café", "leite", "tapioca", "pão"] (o que fizer mais sentido).
-- Remova conjunções, interjeições e texto não relacionado à compra ("Quero comprar", "Tem", "Oi", etc).
+Para cada produto, extraia:
+- item: Nome genérico (ex: "Café", "Arroz"). Obrigatório.
+- marca: Marca específica se mencionada.
+- especificacao: Tipo/preparo (ex: "integral", "moído").
+- tamanho: Peso/volume (ex: "1kg", "500g").
+- qualquer_marca: true se o usuário usou termos como "qualquer", "o mais barato", "não importa a marca", "tanto faz". Caso contrário, false.
 
-Retorne APENAS um JSON no formato:
-{"itens": ["item1", "item2"]}
-`,
-            config: { responseMimeType: 'application/json', temperature: 0.1 },
+Exemplos:
+- "Quero qualquer arroz e um feijão barato" → [{"item":"Arroz","marca":null,...,"qualquer_marca":true},{"item":"Feijão",...,"qualquer_marca":true}]
+- "Café Melitta" → [{"item":"Café","marca":"Melitta",...,"qualquer_marca":false}]
+
+Retorne APENAS um JSON: {"itens":[{"item":"...","qualquer_marca":boolean}]}`,
+            config: { responseMimeType: 'application/json', temperature: 0.0 },
         });
 
         logTokens('extrair_lista_compras', 'system', 'system', result.usageMetadata);
-        const schema = z.object({ itens: z.array(z.string()) });
-        const dados = parseSafe(schema, result.text || '{}', { itens: [texto.trim()] });
-        
-        // Retorna a própria string sanitizada caso a IA falhe em particionar
-        if (!dados.itens || dados.itens.length === 0) {
-            return [texto.trim()];
-        }
-        
-        // Sanitiza a lista retornada, cortando strings muito longas como fallback global de erro
-        return dados.itens.map(i => i.trim()).filter(i => i.length > 0).slice(0, 5); // Limite de 5 itens para segurança
+        const dados = parseSafe(ListaIntencaoSchema, result.text || '{}', { itens: [] });
+
+        if (!dados.itens || dados.itens.length === 0) return [{ item: texto.trim(), qualquer_marca: false }];
+
+        return dados.itens.map(i => ({
+            item:           i.item.trim(),
+            marca:          i.marca         ?? null,
+            especificacao:  i.especificacao ?? null,
+            tamanho:        i.tamanho       ?? null,
+            qualquer_marca: i.qualquer_marca ?? false,
+        })).slice(0, 8);
     } catch (e) {
         logger.error({ erro: e, texto }, '[Motor Semântico] Erro NLP extrairListaCompras');
-        return [texto.trim()]; // Fallback para busca unificada
+        return [{ item: texto.trim(), qualquer_marca: false }];
     }
 }
