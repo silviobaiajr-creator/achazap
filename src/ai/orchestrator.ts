@@ -961,11 +961,11 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                         
                         if (idsValidos !== null) {
                             // Reranking funcionou: Fica apenas com o que o Gemini aprovou
-                            ofertas = ofertasSemanticas.filter(of => idsValidos.includes(of.id));
+                            ofertas = ofertasSemanticas.filter((of: any) => idsValidos.includes(of.id));
                             logger.info({ aprovadas: ofertas.length }, '[Motor Semântico] Reranking concluído');
                         } else {
                             // Falha no Reranking: Fallback conservador (apenas similaridade alta >= 0.7)
-                            ofertas = ofertasSemanticas.filter(of => of.similarity >= 0.7);
+                            ofertas = ofertasSemanticas.filter((of: any) => of.similarity >= 0.7);
                             logger.warn({ aprovadasConservadoras: ofertas.length }, '[Motor Semântico] Fallback Conservador ativado devido a erro na IA');
                         }
                     } else if (errorSemantico) {
