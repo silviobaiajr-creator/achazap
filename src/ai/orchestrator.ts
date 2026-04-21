@@ -950,7 +950,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                     const { data: ofertasSemanticas, error: errorSemantico } = await supabase.rpc('buscar_ofertas_semantico', {
                         p_estado: contexto!.dadosConsumidor?.estado || 'PA',
                         p_query_embedding: vetorBusca,
-                        p_match_threshold: 0.5,
+                        p_match_threshold: 0.68,
                         p_limit: 30
                     });
 

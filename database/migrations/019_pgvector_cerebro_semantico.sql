@@ -21,7 +21,7 @@ DROP FUNCTION IF EXISTS public.buscar_ofertas_semantico(text, vector, float, int
 CREATE OR REPLACE FUNCTION public.buscar_ofertas_semantico(
     p_estado text,
     p_query_embedding vector(768),
-    p_match_threshold float DEFAULT 0.5,
+    p_match_threshold float DEFAULT 0.68,
     p_limit int DEFAULT 30
 )
 RETURNS TABLE (
