@@ -64,19 +64,22 @@ export async function refinarCandidatosBusca(termoUsuario: string, candidatos: a
     try {
         const result = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: `Você é um refinador de busca de e-commerce.
+            contents: `Você é um refinador de busca de e-commerce MUITO RIGOROSO.
 O usuário buscou o termo exato: "${termoUsuario}"
-O banco de dados vetorial retornou a seguinte lista de possíveis candidatos (candsSlim):
+O banco de dados retornou a seguinte lista de possíveis candidatos (candsSlim):
 ${JSON.stringify(candsSlim)}
 
-Sua tarefa: Retornar APENAS os IDs dos produtos que FAZEM SENTIDO e correspondem diretamente ou são sinônimos pertinentes para o que o usuário quer.
-Exemplo: Se o usuário quer "Ração", não retorne o ID de "Coca-Cola" ou "Prato".
-Se nada fizer sentido, retorne uma array vazia [].
+Sua tarefa: Retornar APENAS os IDs dos produtos que atendem DIRETAMENTE à intenção de busca.
+REGRAS RÍGIDAS:
+1. NÃO aceite categorias cruzadas (Ex: Se a busca for "Tapioca", REJEITE "Sorvete de Tapioca" ou "Biscoito sabor Tapioca").
+2. NÃO aceite preparos incompatíveis (Ex: Se a busca for "Cuscuz", REJEITE "Fubá Mimoso", pois Fubá tipicamente faz polenta/bolo, aceitando apenas "Flocão" ou "Cuscuz").
+3. Se a intenção do usuário é um ingrediente base, produtos compostos que o contenham devem ser vetados.
+4. Se NENHUM produto atender exatamente à intenção, não tente adivinhar. Retorne uma array vazia [].
 
 Retorne EXCLUSIVAMENTE um JSON com este formato:
 {"ids_validos": ["uuid1", "uuid2"]}
 `,
-            config: { responseMimeType: 'application/json', temperature: 0.1 },
+            config: { responseMimeType: 'application/json', temperature: 0.0 },
         });
         
         logTokens('refinar_candidatos_busca', 'system', 'system', result.usageMetadata);

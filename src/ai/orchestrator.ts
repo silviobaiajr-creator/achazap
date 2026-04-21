@@ -930,7 +930,15 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
                 let ofertas = ofertasTextuais || [];
 
-                // Peneira Automática: Se a busca exata falhar, tenta Busca Semântica
+                // 1. Reranking na Busca Textual (Evita falso positivo do "Sorvete de Tapioca" na busca de "Tapioca")
+                if (ofertas.length > 0) {
+                    const idsValidos = await refinarCandidatosBusca(termoBusca, ofertas);
+                    if (idsValidos !== null) {
+                        ofertas = ofertas.filter((of: any) => idsValidos.includes(of.id));
+                    }
+                }
+
+                // 2. Fallback Semântico: Se falhar ou a IA vetar todos os textuais
                 if (ofertas.length === 0) {
                     logger.info({ termoBusca, estado: contexto!.dadosConsumidor?.estado }, '[Motor Semântico] Fallback ativado para busca do consumidor');
                     const vetorBusca = await gerarEmbedding(termoBusca);
