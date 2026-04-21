@@ -88,3 +88,47 @@ Retorne EXCLUSIVAMENTE um JSON com este formato:
         return null; // Sinaliza falha para o orchestrator ativar o Fallback
     }
 }
+
+/**
+ * Função NLP para o Modo Lista de Compras.
+ * Lê a mensagem do usuário e separa em itens de consumo unificados.
+ */
+export async function extrairListaCompras(texto: string): Promise<string[]> {
+    if (!texto || texto.trim().length === 0) return [];
+
+    try {
+        const result = await ai.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: `Você é uma IA extratora de ingredientes e listas de compras.
+O usuário digitou: "${texto}"
+
+Objetivo:
+- Analise se a frase contém um ou múltiplos produtos (itens de supermercado, comida, bebida, mercearia, etc).
+- Para cada produto encontrado, crie uma string simples contendo as palavras-chave principais do item e guarde numa array.
+- Exemplo 1: "Tem café, açúcar e 1 pacote de macarrão?" -> ["café", "açúcar", "pacote de macarrão"]
+- Exemplo 2: "Me dá um quilo de feijão preto" -> ["feijão preto"]
+- Exemplo 3: "Quero tomar um café com leite com tapioca e pão quentinho" -> ["café com leite", "tapioca", "pão"] ou ["café", "leite", "tapioca", "pão"] (o que fizer mais sentido).
+- Remova conjunções, interjeições e texto não relacionado à compra ("Quero comprar", "Tem", "Oi", etc).
+
+Retorne APENAS um JSON no formato:
+{"itens": ["item1", "item2"]}
+`,
+            config: { responseMimeType: 'application/json', temperature: 0.1 },
+        });
+
+        logTokens('extrair_lista_compras', 'system', 'system', result.usageMetadata);
+        const schema = z.object({ itens: z.array(z.string()) });
+        const dados = parseSafe(schema, result.text || '{}', { itens: [texto.trim()] });
+        
+        // Retorna a própria string sanitizada caso a IA falhe em particionar
+        if (!dados.itens || dados.itens.length === 0) {
+            return [texto.trim()];
+        }
+        
+        // Sanitiza a lista retornada, cortando strings muito longas como fallback global de erro
+        return dados.itens.map(i => i.trim()).filter(i => i.length > 0).slice(0, 5); // Limite de 5 itens para segurança
+    } catch (e) {
+        logger.error({ erro: e, texto }, '[Motor Semântico] Erro NLP extrairListaCompras');
+        return [texto.trim()]; // Fallback para busca unificada
+    }
+}

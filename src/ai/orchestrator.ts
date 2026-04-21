@@ -43,7 +43,7 @@ import { ai, GEMINI_MODEL } from '../lib/gemini.js';
 // ── Skills importadas (Fase 1 de Modularização) ──────────────────────────────
 import { buscarProdutosSimilares, ingeriCatalogo, atualizarPrecoLedger, retirarEstoqueLedger, gerarEmbedding } from './skills/catalog-ledger.js';
 import { obterEstatisticas, criarOferta, buscarOfertasAtivas } from './skills/store-services.js';
-import { detectarFugaNLP, detectarIntencaoProativa, refinarCandidatosBusca } from './skills/intent-detector.js';
+import { detectarFugaNLP, detectarIntencaoProativa, refinarCandidatosBusca, extrairListaCompras } from './skills/intent-detector.js';
 import { processarRevisaoPrecos, calcularSeloFrescor } from './skills/revisor.js';
 import { processarMidia, processLoteProdutos, formatarCartaoProduto } from './skills/vision-processor.js';
 // ─────────────────────────────────────────────────────────────────────────────
@@ -911,62 +911,76 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 return;
             }
 
-            let termoBusca = userMessageText.trim();
-
-            await sendTextMessage(from, `🔍 Procurando as opções de *${termoBusca}* mais baratas e próximas de você em ${contexto!.dadosConsumidor?.bairro}...`);
+            let listaDeBusca = await extrairListaCompras(userMessageText);
+            
+            await sendTextMessage(from, `🔍 Procurando as opções de *${listaDeBusca.join(', ')}* mais baratas e próximas de você em ${contexto!.dadosConsumidor?.bairro}...`);
             await delay(1500);
 
-            // Fetch DB `buscar_ofertas` RPC (Tradicional)
-            const { data: ofertasTextuais, error } = await supabase.rpc('buscar_ofertas', {
-                p_cidade: contexto!.dadosConsumidor?.cidade,
-                p_bairro: contexto!.dadosConsumidor?.bairro,
-                p_estado: contexto!.dadosConsumidor?.estado || 'PA',
-                p_query: termoBusca
-            });
+            let todosEncontrados: any[] = [];
+            let itensNaoEncontrados: string[] = [];
 
-            let ofertas = ofertasTextuais || [];
+            for (const termoBusca of listaDeBusca) {
+                // Fetch DB `buscar_ofertas` RPC (Tradicional)
+                const { data: ofertasTextuais, error } = await supabase.rpc('buscar_ofertas', {
+                    p_cidade: contexto!.dadosConsumidor?.cidade,
+                    p_bairro: contexto!.dadosConsumidor?.bairro,
+                    p_estado: contexto!.dadosConsumidor?.estado || 'PA',
+                    p_query: termoBusca
+                });
 
-            // Peneira Automática: Se a busca exata falhar, tenta Busca Semântica
-            if (ofertas.length === 0) {
-                logger.info({ termoBusca, estado: contexto!.dadosConsumidor?.estado }, '[Motor Semântico] Fallback ativado para busca do consumidor');
-                const vetorBusca = await gerarEmbedding(termoBusca);
-                
-                if (vetorBusca) {
-                    const { data: ofertasSemanticas, error: errorSemantico } = await supabase.rpc('buscar_ofertas_semantico', {
-                        p_estado: contexto!.dadosConsumidor?.estado || 'PA',
-                        p_query_embedding: vetorBusca,
-                        p_match_threshold: 0.6, // Mais permissivo para o Gemini poder escolher
-                        p_limit: 15
-                    });
+                let ofertas = ofertasTextuais || [];
 
-                    if (!errorSemantico && ofertasSemanticas && ofertasSemanticas.length > 0) {
-                        logger.info({ retornadas: ofertasSemanticas.length }, '[Motor Semântico] Submetendo ao Reranking do Gemini');
-                        
-                        const idsValidos = await refinarCandidatosBusca(termoBusca, ofertasSemanticas);
-                        
-                        if (idsValidos !== null) {
-                            // Reranking funcionou: Fica apenas com o que o Gemini aprovou
-                            ofertas = ofertasSemanticas.filter((of: any) => idsValidos.includes(of.id));
-                            logger.info({ aprovadas: ofertas.length }, '[Motor Semântico] Reranking concluído');
-                        } else {
-                            // Falha no Reranking: Fallback conservador (apenas similaridade alta >= 0.7)
-                            ofertas = ofertasSemanticas.filter((of: any) => of.similarity >= 0.7);
-                            logger.warn({ aprovadasConservadoras: ofertas.length }, '[Motor Semântico] Fallback Conservador ativado devido a erro na IA');
+                // Peneira Automática: Se a busca exata falhar, tenta Busca Semântica
+                if (ofertas.length === 0) {
+                    logger.info({ termoBusca, estado: contexto!.dadosConsumidor?.estado }, '[Motor Semântico] Fallback ativado para busca do consumidor');
+                    const vetorBusca = await gerarEmbedding(termoBusca);
+                    
+                    if (vetorBusca) {
+                        const { data: ofertasSemanticas, error: errorSemantico } = await supabase.rpc('buscar_ofertas_semantico', {
+                            p_estado: contexto!.dadosConsumidor?.estado || 'PA',
+                            p_query_embedding: vetorBusca,
+                            p_match_threshold: 0.6, // Mais permissivo para o Gemini poder escolher
+                            p_limit: 15
+                        });
+
+                        if (!errorSemantico && ofertasSemanticas && ofertasSemanticas.length > 0) {
+                            logger.info({ retornadas: ofertasSemanticas.length }, '[Motor Semântico] Submetendo ao Reranking do Gemini');
+                            
+                            const idsValidos = await refinarCandidatosBusca(termoBusca, ofertasSemanticas);
+                            
+                            if (idsValidos !== null) {
+                                // Reranking funcionou: Fica apenas com o que o Gemini aprovou
+                                ofertas = ofertasSemanticas.filter((of: any) => idsValidos.includes(of.id));
+                                logger.info({ aprovadas: ofertas.length }, '[Motor Semântico] Reranking concluído');
+                            } else {
+                                // Falha no Reranking: Fallback conservador (apenas similaridade alta >= 0.7)
+                                ofertas = ofertasSemanticas.filter((of: any) => of.similarity >= 0.7);
+                                logger.warn({ aprovadasConservadoras: ofertas.length }, '[Motor Semântico] Fallback Conservador ativado devido a erro na IA');
+                            }
+                        } else if (errorSemantico) {
+                            logger.error({ errorSemantico }, '[Motor Semântico] Erro no RPC');
                         }
-                    } else if (errorSemantico) {
-                        logger.error({ errorSemantico }, '[Motor Semântico] Erro no RPC');
                     }
                 }
-            }
 
-            if (!ofertas || ofertas.length === 0) {
-                await sendTextMessage(from, '😕 Poxa, ainda não encontrei nenhuma loja com essa oferta na sua região. Tente buscar outro produto!');
+                if (ofertas && ofertas.length > 0) {
+                    // Adiciona a melhor oferta deste item à lista mista
+                    todosEncontrados.push(ofertas[0]); 
+                } else {
+                    itensNaoEncontrados.push(termoBusca);
+                }
+            } // end loop
+
+            if (todosEncontrados.length === 0) {
+                await sendTextMessage(from, `😕 Poxa, não encontrei nenhum dos itens da sua lista na sua região. Tente buscar outros produtos!`);
                 return;
             }
 
-            // Pega top 3
-            const top3 = ofertas.slice(0, 3);
-            let msgBusca = `🎯 *Encontrei ${ofertas.length} opções!*\n\nVeja as melhores:\n\n`;
+            // Ordena os itens encontrados pelo preço (opcional) e pega top 3 misto da cesta
+            todosEncontrados.sort((a, b) => Number(a.preco_atual) - Number(b.preco_atual));
+            const top3 = todosEncontrados.slice(0, 3);
+            
+            let msgBusca = `🎯 *Encontrei opções para sua lista!*\n\nVeja as melhores escolhas:\n\n`;
 
             for (let i = 0; i < top3.length; i++) {
                 const offer = top3[i];
@@ -989,9 +1003,19 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 msgBusca += promoText ? `${promoText}\n\n` : `\n\n`;
             }
 
-            await sendInteractiveButtons(from, msgBusca + `👀 Deseja revelar a loja da Opção 1? Seremos transparentes: isso gasta os preciosos e poucos créditos do lojista, então só clique se você realmente tiver intenção de avaliar a oferta!`, [
-                { id: `revelar_${top3[0].id}_${top3[0].loja_id}`, title: '🔓 Revelar Opção 1' }
-            ]);
+            if (itensNaoEncontrados.length > 0) {
+                msgBusca += `😕 *Em falta hoje:* Apenas não encontrei ofertas para ${itensNaoEncontrados.join(', ')}.\n\n`;
+            }
+            
+            msgBusca += `👀 Deseja revelar a loja de qual opção? (Isso gasta créditos do lojista, seja consciente!)`;
+
+            // Fix dos Botões: Gera dinamicamente N botões baseado no array (máximo 3 já garantido pelo slice)
+            const botoes = top3.map((offer, idx) => ({
+                id: `revelar_${offer.id}_${offer.loja_id}`,
+                title: `🔓 Revelar Op. ${idx + 1}`
+            }));
+
+            await sendInteractiveButtons(from, msgBusca, botoes);
             return;
         }
         
