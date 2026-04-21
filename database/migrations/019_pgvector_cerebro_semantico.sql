@@ -5,9 +5,9 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- 2. Adicionar coluna vetorial à tabela catalogo_ativo
--- O Gemini 'gemini-embedding-001' produz vetores de 3072 dimensões.
+-- O Gemini 'gemini-embedding-001' produz vetores de 768 dimensões.
 ALTER TABLE public.catalogo_ativo
-ADD COLUMN IF NOT EXISTS embedding vector(3072);
+ADD COLUMN IF NOT EXISTS embedding vector(768);
 
 -- 3. Criar índice HNSW para busca ultramais rápida (Cosine Distance)
 CREATE INDEX IF NOT EXISTS catalogo_ativo_embedding_idx 
@@ -19,7 +19,7 @@ WITH (m = 16, ef_construction = 64);
 -- Recebe o embedding do termo do usuário e filtra por estado
 CREATE OR REPLACE FUNCTION public.buscar_ofertas_semantico(
     p_estado text,
-    p_query_embedding vector(3072),
+    p_query_embedding vector(768),
     p_match_threshold float DEFAULT 0.5,
     p_limit int DEFAULT 30
 )
@@ -65,7 +65,7 @@ $$;
 -- Útil ao enviar uma imagem para saber se o produto já existe no estoque daquela loja
 CREATE OR REPLACE FUNCTION public.buscar_similares_semantico(
     p_loja_id uuid,
-    p_query_embedding vector(3072),
+    p_query_embedding vector(768),
     p_match_threshold float DEFAULT 0.7,
     p_limit int DEFAULT 5
 )

@@ -19,6 +19,7 @@ export async function gerarEmbedding(texto: string): Promise<number[] | null> {
         const result = await ai.models.embedContent({
             model: 'gemini-embedding-001',
             contents: texto,
+            config: { outputDimensionality: 768 } // Matryoshka para caber no pgvector HNSW
         });
         // O Supabase PostgREST aceita arrays regulares de números para campos pgvector
         return result.embeddings?.[0]?.values ?? null;
