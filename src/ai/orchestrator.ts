@@ -911,22 +911,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 return;
             }
 
-            // Extrair núcleo do produto para evitar falhas de like/tsquery no banco (ex: "tem feijão aí?" -> "feijão")
-            let termoBusca = userMessageText;
-            if (userMessageText.length > 20 || userMessageText.trim().split(/\s+/).length > 1) {
-                try {
-                    const extraido = await ai.models.generateContent({
-                        model: GEMINI_MODEL,
-                        contents: `Extraia APENAS o termo principal de busca do consumidor, removendo intenções: "${userMessageText}".\nExemplos: "Quero comer pizza" -> "pizza", "Encontre por feijão preto" -> "feijão preto", "tem leite ninho grande?" -> "leite ninho"`,
-                        config: { temperature: 0 }
-                    });
-                    if (extraido.text) {
-                        termoBusca = extraido.text.trim();
-                    }
-                } catch {
-                    // fallback to original if LLM fails
-                }
-            }
+            let termoBusca = userMessageText.trim();
 
             await sendTextMessage(from, `🔍 Procurando as opções de *${termoBusca}* mais baratas e próximas de você em ${contexto!.dadosConsumidor?.bairro}...`);
             await delay(1500);
