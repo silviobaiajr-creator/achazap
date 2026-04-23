@@ -27,7 +27,8 @@ export function formatarCartaoProduto(item: AlteracaoPlanejada, indice: number, 
     const SEP = '───────────────';
     const num = `${indice + 1}.`;
     const precoFoto = `R$ ${item.precoFoto.toFixed(2).replace('.', ',')} / ${item.unidade}`;
-    const rotuloFonte = fonte === 'foto' ? 'Foto' : fonte === 'audio' ? 'Áudio' : 'Digitado';
+    const origemVal = item.fonte || fonte;
+    const rotuloFonte = origemVal === 'foto' ? 'Foto' : origemVal === 'audio' ? 'Áudio' : 'Digitado';
 
     const nomeExibido = (item.acao === 'preco_atualizado' || item.acao === 'sem_alteracao') && item.produtoExistente
         ? item.produtoExistente.produto_nome
@@ -188,6 +189,7 @@ JSON:`;
                     precoFoto: item.preco,
                     unidade:   item.unidade,
                     acao:      'sem_alteracao',
+                    fonte:     mimeType.startsWith('image') ? 'foto' : 'audio',
                 };
 
                 if (similares.length > 0) {

@@ -1583,6 +1583,22 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                     estado: EstadosFluxo.AGUARDANDO_SELECAO_EDICAO,
                 });
                 await sendInteractiveButtons(from, '✏️ Qual produto deseja editar?', botoes);
+            } else if (lista.length <= 10) {
+                const rows = lista.map((a: AlteracaoPlanejada, i: number) => {
+                    const desc = a.acao === 'ambiguo' ? '⚠️ Ambíguo' : `R$ ${a.precoFoto.toFixed(2).replace('.', ',')}`;
+                    return {
+                        id: String(i + 1),
+                        title: `${i + 1}. ${a.nome.substring(0, 20)}`,
+                        description: desc.substring(0, 70),
+                    };
+                });
+                await salvarContexto(from, {
+                    ...contexto,
+                    estado: EstadosFluxo.AGUARDANDO_SELECAO_EDICAO,
+                });
+                await sendListMessage(from, '✏️ Qual produto deseja editar?', 'Escolher Produto', [
+                    { title: 'Produtos na Lista', rows }
+                ]);
             } else {
                 await salvarContexto(from, {
                     ...contexto,

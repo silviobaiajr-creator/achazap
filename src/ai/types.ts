@@ -42,6 +42,7 @@ export interface AlteracaoPlanejada {
     precoFoto: number;
     unidade: string;
     acao: 'novo_cadastro' | 'preco_atualizado' | 'sem_alteracao' | 'ambiguo' | 'remover';
+    fonte?: 'texto' | 'foto' | 'audio';
     produtoExistente?: {
         id: string;
         produto_nome: string;
