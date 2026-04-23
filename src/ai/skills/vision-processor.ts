@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Skill: vision-processor
  * Responsabilidade: Processamento multimodal (foto e áudio) incluindo:
  * - Download e validação da mídia
@@ -56,10 +56,16 @@ export function formatarCartaoProduto(item: AlteracaoPlanejada, indice: number, 
         card += `Sem alteração (confirmado hoje)`;
     } else if (item.acao === 'ambiguo') {
         const numSimilares = item.similares?.length ?? '?';
+        // Lista os nomes dos similares encontrados para o lojista saber exatamente o que o sistema viu
+        const nomesSimilares = item.similares
+            ?.slice(0, 4)
+            .map(s => `• ${s.produto_nome} (R$ ${s.preco.toFixed(2).replace('.', ',')}/${s.unidade})`)
+            .join('\n') ?? '';
         card += `⚠️ ${num} *${item.nome}*\n`;
         card += `💰 ${rotuloFonte}: *${precoFoto}*\n`;
-        card += `📦 ${numSimilares} produto(s) parecido(s) no estoque\n`;
-        card += `Precisa escolher qual atualizar`;
+        card += `📦 *${numSimilares} produto(s) parecido(s) no estoque:*\n`;
+        if (nomesSimilares) card += `${nomesSimilares}\n`;
+        card += `Use ✏️ Editar para escolher qual atualizar`;
     } else {
         card += `📌 ${num} *${item.nome}*\n`;
         card += `💰 ${rotuloFonte}: *${precoFoto}*`;
@@ -183,6 +189,10 @@ JSON:`;
                             unidade:      maisProximo.unidade,
                             atualizado_em: (maisProximo as any).atualizado_em ?? undefined,
                         };
+                        // Herança inteligente: adota a unidade do catálogo se a extração foi genérica
+                        if (alteracao.unidade === 'un' && maisProximo.unidade && maisProximo.unidade !== 'un') {
+                            alteracao.unidade = maisProximo.unidade;
+                        }
                         alteracao.acao = maisProximo.preco === item.preco ? 'sem_alteracao' : 'preco_atualizado';
                     }
                 } else {

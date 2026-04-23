@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type, Part } from '@google/genai';
+﻿import { GoogleGenAI, Type, Part } from '@google/genai';
 import { z } from 'zod';
 import {
     sendTextMessage,
@@ -472,6 +472,11 @@ JSON:`;
                         unidade: maisProximo.unidade,
                         atualizado_em: (maisProximo as any).atualizado_em ?? undefined,
                     };
+                    // Herança inteligente: se a unidade extraída for genérica ("un"),
+                    // adota a unidade já cadastrada no estoque para evitar inconsistências.
+                    if (alteracao.unidade === 'un' && maisProximo.unidade && maisProximo.unidade !== 'un') {
+                        alteracao.unidade = maisProximo.unidade;
+                    }
                     alteracao.acao = maisProximo.preco === item.preco ? 'sem_alteracao' : 'preco_atualizado';
                 }
             } else {

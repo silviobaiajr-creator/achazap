@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Skill: catalog-ledger
  * Responsabilidade: Todas as operações de leitura e escrita no catálogo de produtos.
  * Inclui busca de similares (pgvector semântico), inserção (UPSERT) com 6 camadas
@@ -91,66 +91,95 @@ Retorne APENAS um JSON com esses 5 campos:
 }
 
 // ============================================================
-// BUSCA DE SIMILARES (pgvector semântico)
+// BUSCA DE SIMILARES (pgvector + Reranking Gemini obrigatório)
 // ============================================================
 
 /**
  * Busca produtos similares dentro do estoque de uma loja.
- * Motor: pgvector (busca_similares_semantico) — detecta intenção pelo SIGNIFICADO.
- * Fallback: full-scan se o embedding não estiver disponível.
+ * Fluxo:
+ *   1. Gera embedding → consulta pgvector (candidatos brutos)
+ *   2. SEMPRE filtra os candidatos via Gemini (reranking) — descarta falsos positivos
+ *   3. Fallback: full-scan + filtro Gemini se embedding falhar
+ *
+ * O Gemini é o árbitro final: mesmo que o pgvector retorne algo,
+ * ele confirma se o item é realmente o mesmo produto buscado.
  */
 export async function buscarProdutosSimilares(
     lojaId: string,
     termoBusca: string
 ): Promise<Array<{ id: string; produto_nome: string; preco: number; unidade: string }>> {
 
-    // ── Etapa 1: Busca vetorial (semântica) ──
+    let candidatos: Array<{ id: string; produto_nome: string; preco: number; unidade: string }> = [];
+
+    // ── Etapa 1: Busca vetorial (candidatos brutos) ──
     const vetor = await gerarEmbedding(termoBusca);
     if (vetor) {
         const { data: semanticos, error } = await supabase
             .rpc('buscar_similares_semantico', {
                 p_loja_id:         lojaId,
                 p_query_embedding: vetor,
-                p_match_threshold: 0.6,
-                p_limit:           10,
+                p_match_threshold: 0.55, // Threshold menor — Gemini filtra o ruído restante
+                p_limit:           15,
             });
 
         if (!error && semanticos && semanticos.length > 0) {
-            logger.info({ lojaId, termoBusca, total: semanticos.length }, '[Similares] Motor vetorial retornou candidatos');
-            return semanticos;
+            logger.info({ lojaId, termoBusca, total: semanticos.length }, '[Similares] Candidatos vetoriais encontrados, enviando para reranking');
+            candidatos = semanticos;
+        } else if (error) {
+            logger.warn({ err: error.message }, '[Similares] Erro no motor vetorial, tentando full-scan');
         }
-        if (error) logger.warn({ err: error.message }, '[Similares] Erro no motor vetorial, usando full-scan');
     }
 
-    // ── Fallback: full-scan em catalogo_ativo ──
-    const { data, error: scanError } = await supabase
-        .from('catalogo_ativo')
-        .select('id, produto_nome, preco, unidade')
-        .eq('loja_id', lojaId)
-        .eq('disponivel', true);
+    // ── Fallback: full-scan se embedding falhou ou não retornou nada ──
+    if (candidatos.length === 0) {
+        const { data, error: scanError } = await supabase
+            .from('catalogo_ativo')
+            .select('id, produto_nome, preco, unidade')
+            .eq('loja_id', lojaId)
+            .eq('disponivel', true);
 
-    if (scanError || !data || data.length === 0) return [];
-    logger.info({ lojaId, total: data.length }, '[Similares] Full-scan ativado');
+        if (scanError || !data || data.length === 0) return [];
+        logger.info({ lojaId, total: data.length }, '[Similares] Full-scan ativado');
+        candidatos = data;
+    }
 
-    // Filtra os candidatos do full-scan via Gemini
-    const catalogList = data
+    // ── Etapa 2: Reranking OBRIGATÓRIO via Gemini ──
+    // O Gemini valida cada candidato: se não é o mesmo produto, descarta.
+    // Isso evita que falsos positivos do pgvector apareçam para o lojista.
+    const catalogList = candidatos
         .map((p, i) => `${i + 1}. ${p.produto_nome} (R$ ${p.preco} / ${p.unidade})`)
         .join('\n');
 
     try {
         const result = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: `Produto buscado: "${termoBusca}". Qual dos itens abaixo é o MESMO produto?
-Catálogo:\n${catalogList}\nRetorne APENAS um array JSON de índices (começando em 1), ou [] se nenhum for igual.`,
+            contents: `Você é um especialista em catálogos de supermercado.
+O lojista quer cadastrar/atualizar o produto: "${termoBusca}".
+
+Dos itens abaixo do ESTOQUE DA LOJA, quais são o MESMO produto (ou variações diretas dele)?
+Estoque:
+${catalogList}
+
+Regras de decisão:
+- Considere MESMO produto: mesmo item com marca ou embalagem diferente. Ex: "Feijão" encontra "Feijão Carioca 1kg", "Feijão Preto Kicaldo".
+- DESCARTE categorias completamente diferentes. Ex: "Feijão" NÃO é "Arroz", "Macarrão" ou "Leite".
+- Se nenhum for o mesmo produto, retorne [].
+
+Retorne APENAS um array JSON com os índices dos itens correspondentes (começando em 1), ou [].`,
             config: { responseMimeType: 'application/json' },
         });
-        logTokens('buscar_similares_fullscan_gemini', lojaId, lojaId, result.usageMetadata);
+        logTokens('buscar_similares_reranking_gemini', lojaId, lojaId, result.usageMetadata);
+
         const indices = parseSafe(IndicesSimilaresSchema, result.text || '[]', []);
-        return indices
-            .filter((idx: number) => idx >= 1 && idx <= data.length)
-            .map((idx: number) => data[idx - 1]);
+        const filtrados = indices
+            .filter((idx: number) => idx >= 1 && idx <= candidatos.length)
+            .map((idx: number) => candidatos[idx - 1]);
+
+        logger.info({ lojaId, termoBusca, candidatos: candidatos.length, aprovados: filtrados.length }, '[Similares] Reranking Gemini concluído');
+        return filtrados;
     } catch (e) {
-        logger.error({ e }, '[Similares] Erro no Gemini do full-scan');
+        // Segurança: se o Gemini falhar, retorna vazio para não mostrar dados incorretos
+        logger.error({ e }, '[Similares] Erro no reranking Gemini — retornando vazio por segurança');
         return [];
     }
 }
