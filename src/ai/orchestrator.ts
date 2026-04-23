@@ -558,9 +558,9 @@ JSON:`;
 async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: ContextoSessao, produto: DadosProduto) {
     const similares = await buscarProdutosSimilares(loja.id, produto.nome);
 
-    // Sprint Auditoria: Se estamos vindo do IDLE, SEMPRE usamos o Card de Confirmação (lote de 1)
-    // para evitar gravações acidentais sem o lojista dar o OK final.
-    if (contexto.estado === EstadosFluxo.IDLE) {
+    // Se veio do IDLE e não há similares: vai direto para lote de 1 (confirmação sem ambiguidade)
+    // Se veio do IDLE mas há similares: vai para os botões diretamente (sem o card de resumo intermediário)
+    if (contexto.estado === EstadosFluxo.IDLE && similares.length === 0) {
         await processarLoteProdutos(from, loja, [produto], contexto);
         return;
     }
@@ -1677,24 +1677,50 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         
         // Se o item tem múltiplas opções (ambíguo), mostra a lista para desempate
         if (itemEscolhido.acao === 'ambiguo' && itemEscolhido.similares && itemEscolhido.similares.length > 1) {
-            // ... (mantém lógica de desempate existente) ...
-            let msgOpcoes = `⚠️ *Encontrei ${itemEscolhido.similares.length} opções no estoque*\nQual delas é a correspondente?\n\n`;
-            itemEscolhido.similares.forEach((s: any, idx: number) => {
-                msgOpcoes += `───────────────\n`;
-                msgOpcoes += `*${idx + 1}* - ${s.produto_nome}\n`;
-                msgOpcoes += `📦 Estoque: R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade}\n`;
-            });
-            msgOpcoes += `───────────────\n`;
-            msgOpcoes += `*0* - Nenhum (cadastrar como novo)`;
-            
+            const similares = itemEscolhido.similares;
+
             await salvarContexto(from, {
                 ...contexto,
                 estado: EstadosFluxo.AGUARDANDO_NOVO_PRECO_EDICAO,
                 acao: indiceReal.toString() + '_desempate',
-                perguntaPendente: msgOpcoes,
+                similaresEncontrados: similares,
+                dadosProduto: { nome: itemEscolhido.nome, preco: itemEscolhido.precoFoto, unidade: itemEscolhido.unidade },
+                perguntaPendente: `Qual deles é o correspondente ao *${itemEscolhido.nome}*?`,
             });
-            
-            await sendTextMessage(from, msgOpcoes);
+
+            // Mesmo padrão de botões da Melhoria 1 — sem duplicidade de UX
+            if (similares.length <= 2) {
+                const botoes: Array<{ id: string; title: string }> = similares.map((s: any, i: number) => ({
+                    id: String(i + 1),
+                    title: `✅ ${s.produto_nome.substring(0, 20)}`,
+                }));
+                botoes.push({ id: '0', title: '🔄 Cadastrar como Novo' });
+
+                const textoSimples = similares
+                    .map((s: any, i: number) => `*${i + 1}* - ${s.produto_nome} (R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade})`)
+                    .join('\n');
+
+                await sendTextMessage(from, `🔍 *Qual destes é o ${itemEscolhido.nome}?*\n\n${textoSimples}`);
+                await delay(300);
+                await sendInteractiveButtons(from, '↩️ Ou cancele para não alterar nada:', [
+                    ...botoes,
+                    { id: 'btn_cancelar', title: '❌ Cancelar' },
+                ]);
+            } else {
+                let listaMsg = `⚠️ *Encontrei ${similares.length} opções no estoque*\nQual delas é o *${itemEscolhido.nome}*?\n\n`;
+                similares.forEach((s: any, idx: number) => {
+                    listaMsg += `───────────────\n`;
+                    listaMsg += `*${idx + 1}* - ${s.produto_nome}\n`;
+                    listaMsg += `📦 Estoque: R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade}\n`;
+                });
+                listaMsg += `───────────────\n*0* - Nenhum (cadastrar como novo)`;
+
+                await sendTextMessage(from, listaMsg);
+                await delay(300);
+                await sendInteractiveButtons(from, 'Ou desista sem alterar nada:', [
+                    { id: 'btn_cancelar', title: '❌ Cancelar Operação' },
+                ]);
+            }
             return;
         }
         
