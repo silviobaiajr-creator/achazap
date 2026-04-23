@@ -1,4 +1,4 @@
-﻿import { GoogleGenAI, Type, Part } from '@google/genai';
+import { GoogleGenAI, Type, Part } from '@google/genai';
 import { z } from 'zod';
 import {
     sendTextMessage,
@@ -338,6 +338,32 @@ JSON:`;
                 return;
             }
 
+            // UX Melhoria 2: Se faltou apenas o preço e há um único similar no estoque,
+            // perguntar se é o mesmo produto antes de pedir o preço do zero.
+            if (dados.falta === 'preco' && (dados.nome || dadosExistentes?.nome)) {
+                const nomeBusca = dados.nome || dadosExistentes?.nome || '';
+                const similares = await buscarProdutosSimilares(loja.id, nomeBusca);
+                if (similares.length === 1) {
+                    const s = similares[0];
+                    await salvarContexto(from, {
+                        ...contexto,
+                        estado: EstadosFluxo.AGUARDANDO_ACAO_SIMILARES,
+                        dadosProduto: { nome: nomeBusca, preco: 0, unidade: s.unidade },
+                        similaresEncontrados: similares,
+                        acao: 'cadastrar',
+                        retries: 0,
+                    });
+                    await sendTextMessage(from, `Já tenho *${s.produto_nome}* no seu estoque por R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade}.`);
+                    await delay(300);
+                    await sendInteractiveButtons(from, 'O que deseja fazer?', [
+                        { id: '1', title: '🔄 Atualizar Preço' },
+                        { id: '0', title: '🆕 É um produto diferente' },
+                        { id: 'btn_cancelar', title: '❌ Cancelar' },
+                    ]);
+                    return;
+                }
+            }
+
             let pergunta = '';
             if (dados.falta === 'preco') {
                 const nome = dados.nome || dadosExistentes?.nome || 'produto';
@@ -347,6 +373,7 @@ JSON:`;
             } else if (dados.falta === 'unidade') {
                 pergunta = 'Qual a unidade? (kg, g, un, pacote, cx, lata...)';
             }
+
 
             // Sprint 10 #3: merge null-safe — novo dado só substitui se não for null/undefined
             const novosDados: Partial<DadosProduto> = {
@@ -539,16 +566,6 @@ async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: 
     }
 
     if (similares.length > 0) {
-        let listaMsg = '🔍 *Encontrei produtos parecidos no estoque*\nResponda com o número correspondente:\n\n';
-        for (let i = 0; i < similares.length; i++) {
-            const s = similares[i];
-            listaMsg += `───────────────\n`;
-            listaMsg += `*${i + 1}* - ${s.produto_nome}\n`;
-            listaMsg += `📦 Estoque: R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade}\n`;
-        }
-        listaMsg += `───────────────\n`;
-        listaMsg += `*0* - Nenhum (cadastrar como novo)`;
-
         await salvarContexto(from, {
             ...contexto,
             estado: EstadosFluxo.AGUARDANDO_ACAO_SIMILARES,
@@ -557,7 +574,43 @@ async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: 
             acao: 'cadastrar',
             retries: 0,
         });
-        await sendTextMessage(from, listaMsg);
+
+        // UX Melhoria 1: Para 1 ou 2 similares, usar botões interativos
+        if (similares.length <= 2) {
+            const botoes: Array<{ id: string; title: string }> = similares.map((s, i) => ({
+                id: String(i + 1),
+                title: `✅ ${s.produto_nome.substring(0, 20)}`,
+            }));
+            botoes.push({ id: '0', title: '🔄 Cadastrar como Novo' });
+
+            const textoSimples = similares
+                .map((s, i) => `*${i + 1}* - ${s.produto_nome} (R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade})`)
+                .join('\n');
+
+            await sendTextMessage(from, `🔍 *Produtos parecidos no estoque:*\n\n${textoSimples}\n\nEste é o mesmo produto que você quer atualizar?`);
+            await delay(300);
+            await sendInteractiveButtons(from, '↩️ Ou cancele para voltar ao menu:', [
+                ...botoes,
+                { id: 'btn_cancelar', title: '❌ Cancelar' },
+            ]);
+        } else {
+            // 3 ou mais similares: lista numerada + botão de saída
+            let listaMsg = '🔍 *Encontrei produtos parecidos no estoque*\nResponda com o número correspondente:\n\n';
+            for (let i = 0; i < similares.length; i++) {
+                const s = similares[i];
+                listaMsg += `───────────────\n`;
+                listaMsg += `*${i + 1}* - ${s.produto_nome}\n`;
+                listaMsg += `📦 Estoque: R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade}\n`;
+            }
+            listaMsg += `───────────────\n`;
+            listaMsg += `*0* - Nenhum (cadastrar como novo)`;
+
+            await sendTextMessage(from, listaMsg);
+            await delay(300);
+            await sendInteractiveButtons(from, 'Ou desista sem alterar nada:', [
+                { id: 'btn_cancelar', title: '❌ Cancelar Operação' },
+            ]);
+        }
     } else {
         // Sem similares: INSERT direto
         const { inserido } = await ingeriCatalogo(loja.id, produto);
@@ -1517,13 +1570,29 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         }
         
         if (editar) {
-            await salvarContexto(from, {
-                ...contexto,
-                estado: EstadosFluxo.AGUARDANDO_SELECAO_EDICAO,
-            });
-            await sendTextMessage(from, `Digite o *NÚMERO* do item que deseja editar:\n(Exemplo: digite "2" para editar o segundo item)`);
+            const lista = contexto.alteracoesPlanejadas ?? [];
+
+            // UX Melhoria 3: Para listas curtas (≤3 itens), usar botões dinâmicos
+            if (lista.length <= 3) {
+                const botoes = lista.map((a: AlteracaoPlanejada, i: number) => ({
+                    id: String(i + 1),
+                    title: `${i + 1}. ${a.nome.substring(0, 18)}`,
+                }));
+                await salvarContexto(from, {
+                    ...contexto,
+                    estado: EstadosFluxo.AGUARDANDO_SELECAO_EDICAO,
+                });
+                await sendInteractiveButtons(from, '✏️ Qual produto deseja editar?', botoes);
+            } else {
+                await salvarContexto(from, {
+                    ...contexto,
+                    estado: EstadosFluxo.AGUARDANDO_SELECAO_EDICAO,
+                });
+                await sendTextMessage(from, `Digite o *NÚMERO* do item que deseja editar:\n(Exemplo: digite "2" para editar o segundo item)`);
+            }
             return;
         }
+
         
         if (cancelou) {
             await sendTextMessage(from, '❌ Alterações canceladas. Nada foi salvo.');
@@ -2030,9 +2099,13 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             } catch { /* ignora erro NLP, vai cair no fallback padrão abaixo */ }
         }
 
-        await sendTextMessage(from, `Não entendi. Digite um número entre *0* e *${similares.length}*, ou diga "Cancelar".`);
+        // UX Melhoria 4: Mensagem de erro contextualizada com o produto em andamento
+        const nomeProdutoContexto = contexto.dadosProduto?.nome
+            ? ` (cadastro de *${contexto.dadosProduto.nome}*)` : '';
+        await sendTextMessage(from, `Não entendi${nomeProdutoContexto}. Digite um número entre *0* e *${similares.length}*, ou toque em Cancelar.`);
         await renovarTTLContexto(from);
         return;
+
     }
 
     // ══════════════════════════════════════════════════════════

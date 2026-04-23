@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Skill: vision-processor
  * Responsabilidade: Processamento multimodal (foto e áudio) incluindo:
  * - Download e validação da mídia
@@ -9,13 +9,14 @@
 
 import { Part } from '@google/genai';
 import { sendTextMessage, sendInteractiveButtons, sendReaction, type WhatsAppMessage, downloadMedia } from '../../lib/whatsapp.js';
-import { salvarContexto, limparContexto, renovarTTLContexto, liberarLock } from '../../lib/redis-cloud.js';
+import { salvarContexto, limparContexto, renovarTTLContexto, liberarLock, verificarHashMidia } from '../../lib/redis-cloud.js';
 import { ai, GEMINI_MODEL } from '../../lib/gemini.js';
 import { logger, logTokens } from '../../lib/logger.js';
 import { MultimodalExtraidoSchema, parseSafe } from '../schemas.js';
 import { EstadosFluxo, DadosProduto, AlteracaoPlanejada, ContextoSessao } from '../types.js';
 import { buscarProdutosSimilares } from './catalog-ledger.js';
 import { calcularSeloFrescor } from './revisor.js';
+import { createHash } from 'crypto';
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
@@ -107,6 +108,15 @@ export async function processarMidia(msg: WhatsAppMessage, from: string, loja: a
             await sendTextMessage(from, '👀 Recebi sua mídia! Me dê uns segundinhos enquanto leio os dados...\n\n💡 *Dica:* sabia que eu consigo ler dezenas de produtos numa *única foto* do seu cardápio de uma vez?');
 
             const buffer = await downloadMedia(mediaInfo.id);
+
+            // ── Filtro de Hash: bloqueia fotos idênticas sem gastar tokens ──
+            const hashHex = createHash('sha256').update(buffer).digest('hex');
+            if (verificarHashMidia(from, hashHex)) {
+                logger.info({ from, hashHex: hashHex.slice(0, 8) }, '[Vision] Foto duplicada detectada pelo hash — ignorada');
+                // Silencioso: não punitivo. O lojista não precisa saber sobre o mecanismo interno.
+                return;
+            }
+
             const base64 = buffer.toString('base64');
 
             const promptMultimodal = `Você é um extrator de dados de catálogo de supermercado/restaurante.
@@ -117,12 +127,16 @@ Regras de escape:
 - Se imagem estiver 100% embaçada/ilegível ou áudio for inaudível/ruído → {"legibilidade_baixa": true, "ruido_detectado": true, "itens": []}
 - Se os dados estiverem visíveis/audíveis, extraia TODOS.
 
+Regra de deduplicação:
+- Se o mesmo produto aparecer com preços diferentes (ex: em duas fotos do mesmo lote), mantenha apenas o preço mais recente (última ocorrência). Ignore duplicatas exatas de nome+preço.
+
 Nome em Title Case. Preço como número. Unidade máx 30 chars.
 Se a unidade não estiver clara, use "un".
 Formato de saída esperado:
 {"legibilidade_baixa": false, "ruido_detectado": false, "itens": [{"nome": "Coca Cola 2L", "preco": 10.50, "unidade": "un"}, {"nome": "Guaraná Antártica", "preco": 8.00, "unidade": "un"}]}
 
 JSON:`;
+
 
             const safeMimeType = mimeType.split(';')[0];
             const imgPart: Part = { inlineData: { data: base64, mimeType: safeMimeType } };

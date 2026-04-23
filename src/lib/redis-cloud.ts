@@ -140,3 +140,20 @@ export function setAvisoSpam(whatsapp: string, ttlSegundos: number): void {
         cache.set(`aviso_spam_midia:${whatsapp}`, true, ttlSegundos * 1000);
     } catch { /* ignora erros de memória locais */ }
 }
+
+// ============================================================
+// Filtro de Hash de Mídia (Anti-token-waste para fotos duplicadas)
+// ============================================================
+const TTL_MEDIA_HASH = 10 * 60 * 1000; // 10 minutos
+
+/**
+ * Registra o hash SHA-256 de uma mídia processada.
+ * Retorna true se a mídia JÁ foi processada recentemente (duplicata),
+ * ou false se é nova (e registra o hash para futuras verificações).
+ */
+export function verificarHashMidia(whatsapp: string, hashHex: string): boolean {
+    const key = `media_hash:${whatsapp}:${hashHex}`;
+    if (cache.get(key)) return true; // duplicata detectada
+    cache.set(key, true, TTL_MEDIA_HASH);
+    return false; // nova mídia — hash registrado
+}
