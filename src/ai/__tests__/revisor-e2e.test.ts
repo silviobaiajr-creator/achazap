@@ -30,16 +30,15 @@ import { processarRevisaoPrecos } from '../skills/revisor.js';
 import { cache, limparContexto } from '../../lib/redis-cloud.js';
 
 // ── DADOS DO TESTE ──────────────────────────────────────────────────────────
-const TEST_PHONE = '5591888888888'; 
-const TEST_WHATSAPP = `+${TEST_PHONE}`;
-
 let lojaId = '';
+let currentPhone = '';
+let currentWhatsApp = '';
 let prodIds: string[] = [];
 
 // ── UTILITÁRIOS ─────────────────────────────────────────────────────────────
 function makeMsg(type: string, text?: string, buttonId?: string): any {
     return {
-        from: TEST_PHONE,
+        from: currentPhone,
         id: `msg_test_${Date.now()}`,
         type,
         text: text ? { body: text } : undefined,
@@ -51,9 +50,10 @@ function makeMsg(type: string, text?: string, buttonId?: string): any {
 
 async function delay(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
-async function setupDB() {
+async function setupDB(phone: string) {
+    const whatsapp = `+${phone}`;
     const { data: loja, error } = await supabase.from('lojas').upsert({
-        whatsapp: TEST_WHATSAPP,
+        whatsapp: whatsapp,
         nome: 'Supermercado Teste E2E',
         cidade: 'Mock City',
         bairro: 'Centro',
@@ -69,7 +69,6 @@ async function setupDB() {
     }
 
     lojaId = loja!.id;
-    console.log(`[TEST_DEBUG] Loja ID: ${lojaId} para WhatsApp: ${TEST_WHATSAPP}`);
 }
 
 async function resetProducts(dias: number, count = 3) {
@@ -102,8 +101,8 @@ async function resetProducts(dias: number, count = 3) {
 async function teardownDB() {
     if (prodIds.length > 0) await supabase.from('catalogo_ativo').delete().in('id', prodIds);
     if (lojaId) await supabase.from('lojas').delete().eq('id', lojaId);
-    await limparContexto(TEST_PHONE);
-    cache.delete(`loja:${TEST_PHONE}`);
+    await limparContexto(currentPhone);
+    cache.delete(`loja:${currentPhone}`);
 }
 
 function getLatestMessage() { return sentMessages.join(' | '); }
@@ -111,20 +110,20 @@ function getLatestMessage() { return sentMessages.join(' | '); }
 // ── SUÍTE DE TESTES ──────────────────────────────────────────────────────────
 
 describe('Revisor de Preços - Bateria Caótica (E2E)', () => {
-    beforeAll(async () => {
-        await setupDB();
-    });
-
-    afterAll(async () => {
-        await teardownDB();
-    });
-
     beforeEach(async () => {
         sentMessages = [];
-        await limparContexto(TEST_PHONE);
-        cache.delete(`loja:${TEST_PHONE}`);
+        currentPhone = `5591${Math.floor(100000000 + Math.random() * 900000000)}`;
+        currentWhatsApp = `+${currentPhone}`;
+        
+        await setupDB(currentPhone);
+        await limparContexto(currentPhone);
+        cache.delete(`loja:${currentPhone}`);
         await resetProducts(10); 
         await delay(500);
+    });
+
+    afterEach(async () => {
+        await teardownDB();
     });
 
     it('Cenário 1: Happy Path - Tudo Verdinho', async () => {
@@ -146,7 +145,7 @@ describe('Revisor de Preços - Bateria Caótica (E2E)', () => {
         
         const resp = getLatestMessage();
         expect(resp).toMatch(/cancelad[ao]/i); // bot responde "Revisão cancelada."
-        expect(cache.get(`contexto:${TEST_PHONE}`)).toBeFalsy(); // null ou undefined = contexto apagado
+        expect(cache.get(`contexto:${currentPhone}`)).toBeFalsy(); // null ou undefined = contexto apagado
     });
 
     it('Cenário 3: Múltiplos Itens (Power User)', async () => {
@@ -237,7 +236,7 @@ describe('Revisor de Preços - Bateria Caótica (E2E)', () => {
     it('Cenário 10: Lojista Fantasma (Timeout)', async () => {
         await processMessage(makeMsg('interactive', undefined, 'menu_revisar'));
         
-        cache.delete(`contexto:${TEST_PHONE}`); // timeout
+        cache.delete(`contexto:${currentPhone}`); // timeout
         
         sentMessages = [];
         await processMessage(makeMsg('text', '1 26,00')); 
@@ -250,7 +249,7 @@ describe('Revisor de Preços - Bateria Caótica (E2E)', () => {
     it('Cenário 11: Preservação de Data no Loop Parcial', async () => {
         // Simula 2 produtos bem velhos (10 dias)
         await resetProducts(10);
-        await processarRevisaoPrecos(TEST_PHONE, { id: lojaId, nome: 'Loja Teste' });
+        await processarRevisaoPrecos(currentPhone, { id: lojaId, nome: 'Loja Teste' });
         
         // Verifica que o relatório inicial mostra "há 10 dias"
         expect(getLatestMessage()).toMatch(/há 10 dias/i);
@@ -291,5 +290,50 @@ describe('Revisor de Preços - Bateria Caótica (E2E)', () => {
         // BUG FIX CHECK: Deve mostrar 3 de 4
         expect(resp).toMatch(/Progresso:.*3 de 4/i);
         expect(resp).toContain('Ainda pendentes');
+    });
+
+    it('Cenário 13: Detecção de Índices Repetidos', async () => {
+        await resetProducts(10, 3);
+        await processMessage(makeMsg('interactive', undefined, 'menu_revisar'));
+        
+        sentMessages = [];
+        await processMessage(makeMsg('text', '1 10,00 1 15,00')); // Repetido
+        const resp = getLatestMessage();
+        expect(resp).toContain('lançou preços diferentes para o mesmo item');
+    });
+
+    it('Cenário 14: Suporte a Ponto de Milhar', async () => {
+        await resetProducts(10, 3);
+        await processMessage(makeMsg('interactive', undefined, 'menu_revisar'));
+        
+        sentMessages = [];
+        await processMessage(makeMsg('text', '1 1.250,50')); 
+        const resp = getLatestMessage();
+        expect(resp).toMatch(/Progresso:.*1 de 3/i);
+        
+        const { data } = await supabase.from('catalogo_ativo').select('preco').eq('loja_id', lojaId).eq('produto_nome', 'Arroz Teste 5kg').single();
+        expect(data?.preco).toBe(1250.50);
+    });
+
+    it('Cenário 15: Continuidade de Grandes Lotes', async () => {
+        // Simula 10 produtos velhos (o bot mostra 8 por vez)
+        await resetProducts(10, 10);
+        await processMessage(makeMsg('interactive', undefined, 'menu_revisar'));
+        
+        // Deve mostrar 8 pendentes iniciais
+        expect(getLatestMessage()).toMatch(/Relatório de Vencimento/i);
+        
+        // Atualiza os 8 primeiros
+        sentMessages = [];
+        await processMessage(makeMsg('text', '1 10 2 10 3 10 4 10 5 10 6 10 7 10 8 10'));
+        
+        let resp = getLatestMessage();
+        expect(resp).toContain('Lote concluído com sucesso');
+        
+        // Espera o novo relatório
+        await delay(2000);
+        resp = getLatestMessage();
+        expect(resp).toMatch(/Relatório de Vencimento/i);
+        expect(resp).toMatch(/item\(s\) precisam de atenção/i);
     });
 });

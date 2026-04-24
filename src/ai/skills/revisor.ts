@@ -87,10 +87,19 @@ export async function processarRevisaoPrecos(from: string, loja: any): Promise<v
     const ex2 = pendentes.length >= 2 ? `\n*2 - ${Number(pendentes[1]!.preco).toFixed(2).replace('.', ',')}*` : '';
     relatorio += `\n✍️ Digite o número e o novo preço.\nExemplo:\n${ex1}${ex2}\n\n_Você pode atualizar vários de uma vez!_\n\n🛑 *Para cancelar a revisão, digite 0*`;
 
+    // Busca a contagem total de produtos desatualizados para o progresso real (Cenário 15)
+    const dataReferenciaTotal = new Date();
+    dataReferenciaTotal.setDate(dataReferenciaTotal.getDate() - 3); // Mesmo critério de 3 dias
+    const { count: totalGeral } = await supabase
+        .from('catalogo_ativo')
+        .select('*', { count: 'exact', head: true })
+        .eq('loja_id', loja.id)
+        .lt('atualizado_em', dataReferenciaTotal.toISOString());
+
     await salvarContexto(from, {
         estado:              EstadosFluxo.AGUARDANDO_SELECAO_REVISAO,
         alteracoesPlanejadas: alteracoes,
-        totalItensRevisao:   alteracoes.length,
+        totalItensRevisao:   totalGeral || alteracoes.length,
         perguntaPendente:    'Digite o número e o novo preço. (Digite 0 para cancelar)',
     });
 

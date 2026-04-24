@@ -1096,16 +1096,23 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         // O (?=\s|$) garante que depois do número venha um espaço ou o fim da linha.
         // Regex blindada: aceita separadores variados e prefixo R$ opcional.
         // (?=\s|$|\n) garante que o preço não seja seguido de letras grudadas (ex: 26,O0).
-        const pairsRegex = /(?:^|\s)(\d+)[\s\-:=>*\/]+((?:R\$\s*)?\d+(?:[.,]\d{1,2})?)(?=\s|$|\n)/gi;
+        // Regex simplificada para capturar o bloco de preço completo (incluindo milhar)
+        const pairsRegex = /(?:^|\s)(\d+)[\s\-:=>*\/]+((?:R\$\s*)?[\d.,]+)(?=\s|$|\n)/gi;
         const pares: { idx: number; preco: number }[] = [];
         let match: RegExpExecArray | null;
 
         while ((match = pairsRegex.exec(userText)) !== null) {
             const idx   = parseInt(match[1]!, 10);
             
-            // Troca vírgula por ponto e extrai só os números
-            const precoLimpo = match[2]!.replace(/[R$\s]/gi, '').replace(',', '.');
-            const preco = Number(precoLimpo); // Usando Number() que falha em NaN se houver letras no meio
+            // Parser Inteligente:
+            // 1. Remove R$ e espaços
+            // 2. Se houver vírgula, assume que é o decimal e remove todos os pontos (milhar)
+            let rawPreco = match[2]!.replace(/[R$\s]/gi, '');
+            if (rawPreco.includes(',')) {
+                rawPreco = rawPreco.replace(/\./g, '').replace(',', '.');
+            }
+            
+            const preco = Number(rawPreco);
             
             if (!isNaN(idx) && !isNaN(preco) && idx >= 1 && idx <= lista.length && preco > 0) {
                 // Trava de Sanidade (Cenário 9)
@@ -1118,6 +1125,13 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         }
 
         if (pares.length > 0) {
+            // Cenário 13: Detecção de Índices Repetidos
+            const idsUnicos = new Set(pares.map(p => p.idx));
+            if (idsUnicos.size < pares.length) {
+                await sendTextMessage(from, `⚠️ *Atenção:* Você lançou preços diferentes para o mesmo item. Por favor, corrija e envie novamente.\n\n_Ex: Se o item 1 mudou para R$ 10,00, mande apenas "1 10,00"._`);
+                return;
+            }
+
             const resultados: string[] = [];
             for (const par of pares) {
                 const item = lista[par.idx - 1]!;
@@ -1136,10 +1150,10 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             const feedbackMsg = `✅ *Progresso:* ${totalConcluido} de ${totalInicial} item(s) revisados.\n` + resultados.join('\n');
 
             if (pendentes.length === 0) {
-                await sendTextMessage(from, feedbackMsg + '\n\n🎉 *Todos os preços estão atualizados!* Obrigado por manter seu catálogo fresquinho.');
-                await limparContexto(from);
-                await delay(400);
-                await enviarMenu(loja.nome, from);
+                await sendTextMessage(from, feedbackMsg + '\n\n🎉 *Lote concluído com sucesso!* Verificando se ainda há itens pendentes...');
+                await delay(800);
+                // Cenário 15: Continuidade automática para grandes estoques
+                await processarRevisaoPrecos(from, loja);
             } else {
                 let novaLista = `${feedbackMsg}\n\n📋 *Ainda pendentes:*\n`;
                 pendentes.forEach((item: AlteracaoPlanejada) => {
