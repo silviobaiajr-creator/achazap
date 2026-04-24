@@ -30,6 +30,7 @@ export async function startQueue() {
     await boss.start();
     await boss.createQueue('messages');
     await boss.createQueue('check-validity'); // Garante que a fila existe antes de agendar
+    await boss.createQueue('sync-embeddings');
     
     // Sprint Validade: Agendamento diário às 09:00 AM
     await boss.schedule('check-validity', '0 9 * * *');

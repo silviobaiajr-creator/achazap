@@ -4,6 +4,7 @@ import { buildServer } from './server.js';
 import { startMessageWorker } from './processor/messageProcessor.js';
 import { startValidityWorker } from './processor/validityWorker.js';
 import { startAnalysisWorker } from './processor/analysisWorker.js';
+import { startEmbeddingWorker } from './processor/embeddingWorker.js';
 import { startQueue, boss } from './queue/pgBossClient.js';
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -34,6 +35,13 @@ async function main() {
             console.log('✅ Worker Analytics Insights (Cron Segunda 9h) ativo');
         } catch (err) {
             console.error('❌ Falha ao iniciar worker Analytics:', err);
+        }
+
+        try {
+            await startEmbeddingWorker();
+            console.log('✅ Worker de Embeddings (Background Sync) ativo');
+        } catch (err) {
+            console.error('❌ Falha ao iniciar worker de Embeddings:', err);
         }
         
         await app.listen({ port: PORT, host: '0.0.0.0' });

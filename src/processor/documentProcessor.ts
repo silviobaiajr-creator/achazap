@@ -2,12 +2,12 @@ import { parse } from 'csv-parse';
 import * as xlsx from 'xlsx';
 import { ai, GEMINI_MODEL } from '../lib/gemini.js';
 import { logger } from '../lib/logger.js';
-import { CSVMapeamentoSchema } from '../ai/schemas.js';
+import { CSVMapeamentoSchema, parseSafe } from '../ai/schemas.js';
 import { sendTextMessage, downloadMedia, sendInteractiveButtons } from '../lib/whatsapp.js';
-import { parseSafe } from '../ai/schemas.js';
 import { pool } from '../lib/db.js';
 import { limparContexto } from '../lib/redis-cloud.js';
 import { decomporProduto } from '../ai/skills/catalog-ledger.js';
+import { boss } from '../queue/pgBossClient.js';
 
 // ─── Constantes de Segurança ──────────────────────────────────────────────────
 const CHUNK_SIZE         = 5000;
@@ -402,6 +402,14 @@ JSON:`;
                 { id: 'menu_principal', title: '🔙 Menu Principal' },
             ]);
         }, 800);
+
+        // Dispara a sincronização de embeddings em background
+        try {
+            await boss.send('sync-embeddings', { lojaId: loja.id }, { retryLimit: 2 });
+            logger.info({ lojaId: loja.id }, '[DOC] Sincronização de embeddings agendada');
+        } catch (queueErr) {
+            logger.error({ err: queueErr, lojaId: loja.id }, '[DOC] Falha ao agendar sincronização de embeddings');
+        }
 
     } catch (err) {
         logger.error({ err, from: masked }, '[DOC] Falha');
