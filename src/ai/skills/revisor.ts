@@ -62,7 +62,7 @@ export async function processarRevisaoPrecos(from: string, loja: any): Promise<v
     }).slice(0, 8);
 
     if (pendentes.length === 0) {
-        await sendTextMessage(from, '✅ *Tudo verdinho!* Todos os seus preços foram atualizados recentemente e estão com selo de confiança dos clientes. Bom trabalho!');
+        await sendTextMessage(from, '✅ *Tudo verdinho!* Todos os seus preços foram atualizados recentemente e estão com selo de confiança dos clientes. Bom trabalho!\n\n_Envie a palavra *Menu* para voltar às opções._');
         return;
     }
 
@@ -84,12 +84,12 @@ export async function processarRevisaoPrecos(from: string, loja: any): Promise<v
 
     const ex1 = pendentes.length >= 1 ? `*1 - ${Number(pendentes[0]!.preco).toFixed(2).replace('.', ',')}*` : '*1 - 0,00*';
     const ex2 = pendentes.length >= 2 ? `\n*2 - ${Number(pendentes[1]!.preco).toFixed(2).replace('.', ',')}*` : '';
-    relatorio += `\n✍️ Digite o número e o novo preço.\nExemplo:\n${ex1}${ex2}\n\n_Você pode atualizar vários de uma vez!_`;
+    relatorio += `\n✍️ Digite o número e o novo preço.\nExemplo:\n${ex1}${ex2}\n\n_Você pode atualizar vários de uma vez!_\n\n🛑 *Para cancelar a revisão, digite 0*`;
 
     await salvarContexto(from, {
         estado:              EstadosFluxo.AGUARDANDO_SELECAO_REVISAO,
         alteracoesPlanejadas: alteracoes,
-        perguntaPendente:    'Digite o número e o novo preço.',
+        perguntaPendente:    'Digite o número e o novo preço. (Digite 0 para cancelar)',
     });
 
     await sendTextMessage(from, relatorio);
