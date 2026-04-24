@@ -945,7 +945,11 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     // ══════════════════════════════════════════════════════════
     // ESCUDO GLOBAL ANTI-SPAM DE MÍDIA
     // ══════════════════════════════════════════════════════════
-    if (isMediaOnly && contexto && contexto.estado !== EstadosFluxo.IDLE && contexto.estado !== EstadosFluxo.AGUARDANDO_DADOS_PRODUTO && contexto.estado !== EstadosFluxo.AGUARDANDO_QUANTIDADE_EMBALAGEM) {
+    if (isMediaOnly && contexto && 
+        contexto.estado !== EstadosFluxo.IDLE && 
+        contexto.estado !== EstadosFluxo.AGUARDANDO_DADOS_PRODUTO && 
+        contexto.estado !== EstadosFluxo.AGUARDANDO_QUANTIDADE_EMBALAGEM &&
+        contexto.estado !== EstadosFluxo.AGUARDANDO_SELECAO_REVISAO) {
         logger.warn({ from, estado: contexto.estado }, '[Proteção] Mídia em estado não-esperado bloqueada');
         
         if (!temAvisoSpam(from)) {
@@ -1063,12 +1067,21 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     if (contexto && contexto.estado === EstadosFluxo.AGUARDANDO_SELECAO_REVISAO) {
         
         // Proteção contra mídias durante a revisão (Cenário 8)
+        const lista: AlteracaoPlanejada[] = contexto.alteracoesPlanejadas ?? [];
+
         if (!isTextOnly) {
-            await sendTextMessage(from, '🛑 Durante a revisão, por favor **digite** o número e o novo preço.\n\nÁudios e fotos são ideais para o Menu Inicial. Digite *0* se quiser cancelar a revisão.');
+            let msgErro = '🛑 *Revisão em andamento:* Durante a revisão, por favor **digite** o número e o novo preço.\n\n' +
+                          'Áudios e fotos são ideais para o Menu Inicial. Digite *0* se quiser cancelar.\n\n' +
+                          '📋 *Ainda pendentes:*\n';
+            
+            lista.forEach((item: AlteracaoPlanejada, i: number) => {
+                const selo = calcularSeloFrescor(item.dataReferencia);
+                msgErro += `*${i + 1}. ${item.nome}* — R$ ${item.precoFoto.toFixed(2).replace('.', ',')} / ${item.unidade} ${selo}\n`;
+            });
+
+            await sendTextMessage(from, msgErro);
             return;
         }
-
-        const lista: AlteracaoPlanejada[] = contexto.alteracoesPlanejadas ?? [];
 
         // Escape explícito com '0' (Cenário 2)
         if (userText.trim() === '0') {

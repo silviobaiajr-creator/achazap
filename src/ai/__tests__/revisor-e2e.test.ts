@@ -69,6 +69,7 @@ async function setupDB() {
     }
 
     lojaId = loja!.id;
+    console.log(`[TEST_DEBUG] Loja ID: ${lojaId} para WhatsApp: ${TEST_WHATSAPP}`);
 }
 
 async function resetProducts(dias: number, count = 3) {
@@ -123,6 +124,7 @@ describe('Revisor de Preços - Bateria Caótica (E2E)', () => {
         await limparContexto(TEST_PHONE);
         cache.delete(`loja:${TEST_PHONE}`);
         await resetProducts(10); 
+        await delay(500);
     });
 
     it('Cenário 1: Happy Path - Tudo Verdinho', async () => {
@@ -216,7 +218,8 @@ describe('Revisor de Preços - Bateria Caótica (E2E)', () => {
         await processMessage(makeMsg('audio', undefined));
         
         const resp = getLatestMessage();
-        expect(resp).toMatch(/digite|texto|cancelar/i);
+        expect(resp).toMatch(/Revisão em andamento/i);
+        expect(resp).toContain('Ainda pendentes');
     });
 
     it('Cenário 9: Preço Absurdo', async () => {
