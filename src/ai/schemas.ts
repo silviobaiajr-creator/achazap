@@ -88,6 +88,9 @@ export const CSVMapeamentoSchema = z.object({
     coluna_preco:   z.string(),
     coluna_unidade: z.string().nullable().optional(),
     coluna_sku:     z.string().nullable().optional(),
+    coluna_marca:   z.string().nullable().optional(),
+    coluna_categoria: z.string().nullable().optional(),
+    coluna_estoque: z.string().nullable().optional(),
 });
 
 export type CSVMapeamento = z.infer<typeof CSVMapeamentoSchema>;

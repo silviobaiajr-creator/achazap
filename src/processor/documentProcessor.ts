@@ -158,14 +158,17 @@ export async function processarDocumento(msg: any, from: string, loja: any, _con
 Amostra:
 ${amostraSanitizada}
 
-Tarefa 1 — Identificar as colunas do arquivo:
-- coluna_nome (obrigatório): coluna que contém o nome do produto
-- coluna_preco (obrigatório): coluna que contém o preço
-- coluna_unidade (opcional): coluna que contém a unidade (kg, un, etc.)
-- coluna_sku (opcional): coluna que contém o código SKU
+Tarefa 1 — Identificar as colunas do arquivo para mapear em nosso sistema:
+- coluna_nome (obrigatório): Nome ou descrição do produto.
+- coluna_preco (obrigatório): Preço de venda.
+- coluna_unidade (opcional): Unidade (un, kg, fardo, etc.).
+- coluna_sku (opcional): Código EAN, Barcode ou ID interno.
+- coluna_marca (opcional): Marca do fabricante.
+- coluna_categoria (opcional): Departamento ou categoria.
+- coluna_estoque (opcional): Quantidade em estoque.
 
-Retorne APENAS JSON com esses 4 campos:
-{"coluna_nome":"...","coluna_preco":"...","coluna_unidade":null,"coluna_sku":null}
+Retorne APENAS o JSON mapeando os nomes reais das colunas encontradas na amostra para nossas chaves:
+{"coluna_nome":"...","coluna_preco":"...","coluna_unidade":null,"coluna_sku":null,"coluna_marca":null,"coluna_categoria":null,"coluna_estoque":null}
 
 JSON:`;
 
@@ -239,6 +242,9 @@ JSON:`;
                         const preco = parseFloat(String(row[mapa.coluna_preco] || '0').replace(',', '.'));
                         const unidade = mapa.coluna_unidade ? String(row[mapa.coluna_unidade] || 'un').trim() : 'un';
                         const sku     = mapa.coluna_sku ? String(row[mapa.coluna_sku] ?? '').trim() || null : null;
+                        const marca_planilha = mapa.coluna_marca ? String(row[mapa.coluna_marca] ?? '').trim() || null : null;
+                        const categoria      = mapa.coluna_categoria ? String(row[mapa.coluna_categoria] ?? '').trim() || null : null;
+                        const estoque        = mapa.coluna_estoque ? String(row[mapa.coluna_estoque] ?? '').trim() || null : null;
 
                         if (!nome || !preco || preco <= 0) { ignorados++; continue; }
 
@@ -269,14 +275,17 @@ JSON:`;
                         if (skuNorm)  mapaPorSku.set(skuNorm, { id: produtoId ?? '', preco });
                         mapaPorNome.set(nomeNorm, { id: produtoId ?? '', preco });
 
-                        linhasNovas.push([
-                            loja.id,
-                            nome.substring(0, 250),
-                            sku,
-                            preco,
-                            unidade.substring(0, 30),
-                            'csv',
-                        ]);
+                        linhasNovas.push({
+                            row: [
+                                loja.id,
+                                nome.substring(0, 250),
+                                sku,
+                                preco,
+                                unidade.substring(0, 30),
+                                'csv',
+                            ],
+                            extra: { marca_planilha, categoria, estoque }
+                        });
 
                         if (isNovo) {
                             inseridos++;
@@ -292,8 +301,21 @@ JSON:`;
 
                     // Decompõe os novos produtos em 6 camadas em paralelo (antes de gravar)
                     const linhasComCamadas = await Promise.all(
-                        linhasNovas.map(async (row) => {
+                        linhasNovas.map(async (item: any) => {
+                            const { row, extra } = item;
                             const camadas = await decomporProduto(row[1]); // row[1] = produto_nome
+                            
+                            // 💡 Inteligência Híbrida: Prioriza a Marca da planilha se detectada
+                            if (extra.marca_planilha) {
+                                camadas.marca = extra.marca_planilha.substring(0, 100);
+                            }
+                            
+                            // 📥 Preservação de Dados: Categoria e Estoque vão para Metadados (JSONB)
+                            const metadados = camadas.metadados || {};
+                            if (extra.categoria) metadados.categoria_planilha = extra.categoria;
+                            if (extra.estoque)   metadados.estoque_atual = extra.estoque;
+                            camadas.metadados = metadados;
+
                             return { row, camadas };
                         })
                     );
@@ -335,9 +357,9 @@ JSON:`;
                         const idMap = new Map<string, string>();
                         for (const r of upsertedRows) idMap.set((r.produto_sku ?? r.produto_nome).toLowerCase(), r.id);
 
-                        const historicoLinhas = linhasNovas.map(row => [
-                            idMap.get((row[2] ?? row[1]).toLowerCase()) ?? null, // produto_id
-                            ...row,  // loja_id, nome, sku, preco, unidade, fonte
+                        const historicoLinhas = linhasNovas.map(item => [
+                            idMap.get((item.row[2] ?? item.row[1]).toLowerCase()) ?? null, // produto_id
+                            ...item.row,  // loja_id, nome, sku, preco, unidade, fonte
                         ]);
                         const histPlaceholders = historicoLinhas.map((_, i) =>
                             `($${i*7+1},$${i*7+2},$${i*7+3},$${i*7+4},$${i*7+5},$${i*7+6},$${i*7+7})`
