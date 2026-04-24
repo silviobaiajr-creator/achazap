@@ -183,6 +183,9 @@ export async function handleOnboarding(
             return true;
         }
 
+        // Mapeia o ID da categoria (ex: 'restaurante') para o título visível (ex: 'Alimentação')
+        const categoriaNome = CATEGORIAS_MENU.flatMap(s => s.rows).find(r => r.id === buttonId)?.title || categoriaKey.toUpperCase();
+
         try {
             const { data: novaLoja, error } = await supabase
                 .from('lojas')
@@ -203,13 +206,14 @@ export async function handleOnboarding(
 
             await sendTextMessage(from,
                 `🎉 Tudo pronto, *${contexto.dadosLojista?.nome}*!\n\n` +
-                `Sua loja foi cadastrada como *${categoriaKey.toUpperCase()}* em *${contexto.dadosLojista?.cidade}*.\n` +
+                `Sua loja foi cadastrada como *${categoriaNome.toUpperCase()}* em *${contexto.dadosLojista?.cidade}*.\n` +
                 `Você ganhou *100 cliques de bônus* para começar! 🎁`
             );
             await delay(800);
             await sendTextMessage(from,
                 `📦 *Agora vamos montar seu catálogo!*\n\n` +
-                `Você pode cadastrar seus produtos de 3 formas:\n\n` +
+                `Você pode cadastrar seus produtos de 4 formas:\n\n` +
+                `📊 *Planilha* — Envie seu arquivo Excel/CSV e eu leio tudo!\n` +
                 `📷 *Foto* — Mande a foto de um produto ou de um encarte inteiro!\n` +
                 `🎙️ *Áudio* — Me mande um áudio falando o nome e o preço.\n` +
                 `✍️ *Texto* — Digite direto. Ex: _Feijão Carioca 8,50_\n\n` +
