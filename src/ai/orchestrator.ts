@@ -1127,7 +1127,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 let novaLista = `${feedbackMsg}\n\n📋 *Ainda pendentes:*\n`;
                 pendentes.forEach((item: AlteracaoPlanejada) => {
                     const idxOriginal = lista.indexOf(item) + 1;
-                    const selo = calcularSeloFrescor(undefined);
+                    const selo = calcularSeloFrescor(item.dataReferencia);
                     novaLista += `*${idxOriginal}. ${item.nome}* — R$ ${item.precoFoto.toFixed(2).replace('.', ',')} / ${item.unidade} ${selo}\n`;
                 });
                 novaLista += `\n✏️ _Ex: *${pendentes.map((_: AlteracaoPlanejada, i: number) => `${lista.indexOf(pendentes[i]!) + 1} 0,00`).slice(0, 2).join(' ')}_`;

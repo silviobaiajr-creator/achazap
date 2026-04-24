@@ -43,6 +43,7 @@ export interface AlteracaoPlanejada {
     unidade: string;
     acao: 'novo_cadastro' | 'preco_atualizado' | 'sem_alteracao' | 'ambiguo' | 'remover';
     fonte?: 'texto' | 'foto' | 'audio';
+    dataReferencia?: string; // Para exibir frescor no loop de revisão
     produtoExistente?: {
         id: string;
         produto_nome: string;

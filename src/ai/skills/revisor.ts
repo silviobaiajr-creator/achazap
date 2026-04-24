@@ -79,6 +79,7 @@ export async function processarRevisaoPrecos(from: string, loja: any): Promise<v
             precoFoto: Number(item.preco),
             unidade:   item.unidade,
             acao:      'preco_atualizado',
+            dataReferencia: item.atualizado_em,
         });
     });
 

@@ -26,7 +26,8 @@ vi.mock('../../lib/whatsapp.js', async (importOriginal) => {
 // Importações REAIS (após o mock)
 import { supabaseAdmin as supabase } from '../../lib/supabase.js';
 import { processMessage } from '../orchestrator.js';
-import { cache } from '../../lib/redis-cloud.js';
+import { processarRevisaoPrecos } from '../skills/revisor.js';
+import { cache, limparContexto } from '../../lib/redis-cloud.js';
 
 // ── DADOS DO TESTE ──────────────────────────────────────────────────────────
 const TEST_PHONE = '5591999999999'; 
@@ -93,7 +94,7 @@ async function resetProducts(dias: number) {
 async function teardownDB() {
     if (prodIds.length > 0) await supabase.from('catalogo_ativo').delete().in('id', prodIds);
     if (lojaId) await supabase.from('lojas').delete().eq('id', lojaId);
-    cache.delete(`contexto:${TEST_PHONE}`);
+    await limparContexto(TEST_PHONE);
     cache.delete(`loja:${TEST_PHONE}`);
 }
 
@@ -112,9 +113,9 @@ describe('Revisor de Preços - Bateria Caótica (E2E)', () => {
 
     beforeEach(async () => {
         sentMessages = [];
-        cache.delete(`contexto:${TEST_PHONE}`);
+        await limparContexto(TEST_PHONE);
         cache.delete(`loja:${TEST_PHONE}`);
-        await resetProducts(10); // garante isolamento: cada teste parte do zero com preços "velhos"
+        await resetProducts(10); 
     });
 
     it('Cenário 1: Happy Path - Tudo Verdinho', async () => {
@@ -234,5 +235,31 @@ describe('Revisor de Preços - Bateria Caótica (E2E)', () => {
         
         const resp = getLatestMessage();
         expect(resp).not.toContain('preço(s) atualizado(s)');
+    });
+
+    it('Cenário 11: Preservação de Data no Loop Parcial', async () => {
+        // Simula 2 produtos bem velhos (10 dias)
+        await resetProducts(10);
+        await processarRevisaoPrecos(TEST_PHONE, { id: lojaId, nome: 'Loja Teste' });
+        
+        // Verifica que o relatório inicial mostra "há 10 dias"
+        expect(getLatestMessage()).toMatch(/há 10 dias/i);
+        
+        // Atualiza apenas o item 1
+        sentMessages = [];
+        // Precisamos setar o contexto manualmente ou via processMessage
+        // Vou usar o processMessage para ser fiel ao fluxo real
+        await processMessage(makeMsg('interactive', undefined, 'menu_revisar'));
+        sentMessages = [];
+        await processMessage(makeMsg('text', '1 50,00'));
+        await delay(1000);
+        
+        const resp = getLatestMessage();
+        expect(resp).toContain('Preços atualizados');
+        expect(resp).toContain('Ainda pendentes');
+        // BUG FIX CHECK: Não deve dizer "Sem data" para o item que sobrou
+        expect(resp).not.toContain('Sem data');
+        expect(resp).not.toContain('Sem data');
+        expect(resp).toMatch(/há 10 dias/i); // Deve manter a info original
     });
 });
