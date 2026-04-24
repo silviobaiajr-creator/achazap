@@ -30,7 +30,7 @@ import { processarRevisaoPrecos } from '../skills/revisor.js';
 import { cache, limparContexto } from '../../lib/redis-cloud.js';
 
 // ── DADOS DO TESTE ──────────────────────────────────────────────────────────
-const TEST_PHONE = '5591999999999'; 
+const TEST_PHONE = '5591888888888'; 
 const TEST_WHATSAPP = `+${TEST_PHONE}`;
 
 let lojaId = '';
@@ -71,17 +71,24 @@ async function setupDB() {
     lojaId = loja!.id;
 }
 
-async function resetProducts(dias: number) {
+async function resetProducts(dias: number, count = 3) {
     await supabase.from('catalogo_ativo').delete().eq('loja_id', lojaId);
     
     const dataAlvo = new Date();
     dataAlvo.setDate(dataAlvo.getDate() - dias);
     
-    const produtos = [
-        { loja_id: lojaId, produto_nome: 'Arroz Teste 5kg', preco: 25.00, unidade: 'pc', disponivel: true, atualizado_em: dataAlvo.toISOString() },
-        { loja_id: lojaId, produto_nome: 'Feijão Teste 1kg', preco: 8.00, unidade: 'pc', disponivel: true, atualizado_em: dataAlvo.toISOString() },
-        { loja_id: lojaId, produto_nome: 'Macarrão Teste 500g', preco: 4.50, unidade: 'pc', disponivel: true, atualizado_em: dataAlvo.toISOString() },
-    ];
+    const nomesPadrao = ['Arroz Teste 5kg', 'Feijão Teste 1kg', 'Macarrão Teste 500g'];
+    const produtos = [];
+    for (let i = 0; i < count; i++) {
+        produtos.push({ 
+            loja_id: lojaId, 
+            produto_nome: nomesPadrao[i] || `Produto Extra ${i+1}`, 
+            preco: (i + 1) * 10, 
+            unidade: 'pc', 
+            disponivel: true, 
+            atualizado_em: dataAlvo.toISOString() 
+        });
+    }
 
     const { data: insertedProds, error } = await supabase.from('catalogo_ativo').upsert(produtos, { onConflict: 'loja_id, produto_nome' }).select('id');
     if (error) {
@@ -149,9 +156,9 @@ describe('Revisor de Preços - Bateria Caótica (E2E)', () => {
         
         const resp = getLatestMessage();
         expect(resp).toMatch(/atualizado/i);
-        
-        const { data } = await supabase.from('catalogo_ativo').select('preco').eq('produto_nome', 'Arroz Teste 5kg').single();
-        expect(data?.preco).toBe(26.00);
+        const { data } = await supabase.from('catalogo_ativo').select('produto_nome, preco').eq('loja_id', lojaId).eq('produto_nome', 'Arroz Teste 5kg').single();
+        if (!data) throw new Error('Produto Arroz Teste 5kg não encontrado após update');
+        expect(data.preco, `Produto: ${data.produto_nome}`).toBe(26.00);
     });
 
     it('Cenário 4: Conclusão do Loop', async () => {
@@ -255,11 +262,31 @@ describe('Revisor de Preços - Bateria Caótica (E2E)', () => {
         await delay(1000);
         
         const resp = getLatestMessage();
-        expect(resp).toContain('Preços atualizados');
+        expect(resp).toContain('Progresso');
         expect(resp).toContain('Ainda pendentes');
         // BUG FIX CHECK: Não deve dizer "Sem data" para o item que sobrou
         expect(resp).not.toContain('Sem data');
         expect(resp).not.toContain('Sem data');
         expect(resp).toMatch(/há 10 dias/i); // Deve manter a info original
+    });
+    it('Cenário 12: Contador de Progresso Cumulativo', async () => {
+        // Simula 4 produtos velhos
+        await resetProducts(10, 4); 
+
+        await processMessage(makeMsg('interactive', undefined, 'menu_revisar'));
+        
+        // Passo 1: Atualiza 2 itens
+        sentMessages = [];
+        await processMessage(makeMsg('text', '1 10,00 2 20,00'));
+        let resp = getLatestMessage();
+        expect(resp).toMatch(/Progresso:.*2 de 4/i);
+        
+        // Passo 2: Atualiza mais 1 item (que agora é o índice 1 na nova lista de 2 pendentes)
+        sentMessages = [];
+        await processMessage(makeMsg('text', '1 30,00'));
+        resp = getLatestMessage();
+        // BUG FIX CHECK: Deve mostrar 3 de 4
+        expect(resp).toMatch(/Progresso:.*3 de 4/i);
+        expect(resp).toContain('Ainda pendentes');
     });
 });

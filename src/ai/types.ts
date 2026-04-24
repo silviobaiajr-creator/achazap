@@ -84,4 +84,5 @@ export interface ContextoSessao {
     similaresEncontrados?: any[];
     itensPendenteConfirmacao?: any[];
     alteracoesPlanejadas?: AlteracaoPlanejada[];
+    totalItensRevisao?: number; // Contador para progresso da revisão
 }

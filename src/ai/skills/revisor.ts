@@ -90,6 +90,7 @@ export async function processarRevisaoPrecos(from: string, loja: any): Promise<v
     await salvarContexto(from, {
         estado:              EstadosFluxo.AGUARDANDO_SELECAO_REVISAO,
         alteracoesPlanejadas: alteracoes,
+        totalItensRevisao:   alteracoes.length,
         perguntaPendente:    'Digite o número e o novo preço. (Digite 0 para cancelar)',
     });
 

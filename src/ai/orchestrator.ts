@@ -1116,7 +1116,11 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
             const atualizadosIds = new Set(pares.map(p => p.idx));
             const pendentes = lista.filter((_: AlteracaoPlanejada, i: number) => !atualizadosIds.has(i + 1));
-            const feedbackMsg = `*Preços atualizados:*\n` + resultados.join('\n');
+            const totalInicial = contexto.totalItensRevisao || lista.length;
+            const pendentesRestantes = pendentes.length;
+            const totalConcluido = totalInicial - pendentesRestantes;
+            
+            const feedbackMsg = `✅ *Progresso:* ${totalConcluido} de ${totalInicial} item(s) revisados.\n` + resultados.join('\n');
 
             if (pendentes.length === 0) {
                 await sendTextMessage(from, feedbackMsg + '\n\n🎉 *Todos os preços estão atualizados!* Obrigado por manter seu catálogo fresquinho.');
@@ -1131,7 +1135,11 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                     novaLista += `*${idxOriginal}. ${item.nome}* — R$ ${item.precoFoto.toFixed(2).replace('.', ',')} / ${item.unidade} ${selo}\n`;
                 });
                 novaLista += `\n✏️ _Ex: *${pendentes.map((_: AlteracaoPlanejada, i: number) => `${lista.indexOf(pendentes[i]!) + 1} 0,00`).slice(0, 2).join(' ')}_`;
-                await salvarContexto(from, { ...contexto, alteracoesPlanejadas: lista });
+                await salvarContexto(from, {
+                    ...contexto,
+                    alteracoesPlanejadas: pendentes,
+                    totalItensRevisao:   totalInicial,
+                });
                 await sendTextMessage(from, novaLista);
             }
             return;
