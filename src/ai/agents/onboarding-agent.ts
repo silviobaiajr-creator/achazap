@@ -17,8 +17,7 @@ import {
 import { salvarContexto, limparContexto } from '../../lib/redis-cloud.js';
 import { supabaseAdmin as supabase } from '../../lib/supabase.js';
 import { EstadosFluxo, ContextoSessao } from '../types.js';
-import { logger } from '../../lib/logger.js';
-import { detectarEstadoPorWhatsApp } from '../../lib/location.js';
+import { logger, criarLoggerConversa } from '../../lib/logger.js';
 import { enviarMenu } from '../shared.js';
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
@@ -88,10 +87,10 @@ export async function handleOnboarding(
         logger.info({ from }, '[OnboardingAgent] Novo número. Iniciando dispatcher.');
         await salvarContexto(from, { estado: EstadosFluxo.ONBOARDING_PERFIL });
         await sendInteractiveButtons(from,
-            'Olá! 👋 Bem-vindo ao AchaZap.\n\nIdentifiquei que este é seu primeiro contato. Como posso te ajudar hoje?',
+            'Olá! Eu sou o *AchaZap*, seu assistente inteligente para vender mais rápido e encontrar as melhores ofertas do bairro. 🚀\n\nComo posso te ajudar agora?',
             [
-                { id: 'perf_lojista',    title: 'Sou Lojista' },
-                { id: 'perf_consumidor', title: 'Quero Comprar' },
+                { id: 'perf_lojista',    title: '📦 Sou Lojista' },
+                { id: 'perf_consumidor', title: '🛍️ Quero Comprar' },
             ]
         );
         return true;
@@ -106,12 +105,12 @@ export async function handleOnboarding(
         }
         if (buttonId === 'perf_consumidor') {
             await salvarContexto(from, { ...contexto, estado: EstadosFluxo.ONBOARDING_CONSUMIDOR_LOCALIZACAO });
-            await sendTextMessage(from, 'Ótimo! 🛍️ Para te mostrar as melhores ofertas perto de você, qual a sua *Cidade e Bairro*?\n\nEx: Portel, Castanheira');
+            await sendTextMessage(from, 'Ótimo! 🛍️ Para te mostrar as melhores ofertas perto de você, qual a sua *Cidade, Estado e Bairro*?\n\nEx: Portel, PA, Centro');
             return true;
         }
         await sendInteractiveButtons(from, 'Por favor, selecione uma das opções abaixo:', [
-            { id: 'perf_lojista',    title: 'Sou Lojista' },
-            { id: 'perf_consumidor', title: 'Quero Comprar' },
+            { id: 'perf_lojista',    title: '📦 Sou Lojista' },
+            { id: 'perf_consumidor', title: '🛍️ Quero Comprar' },
         ]);
         return true;
     }
@@ -127,23 +126,22 @@ export async function handleOnboarding(
             estado: EstadosFluxo.ONBOARDING_LOCALIZACAO,
             dadosLojista: { nome: userText },
         });
-        await sendTextMessage(from, `Legal, *${userText}*!\n\nAgora, qual a sua *Cidade e Bairro*?\nEx: Portel, Castanheira`);
+        await sendTextMessage(from, `Legal, *${userText}*!\n\nAgora, qual a sua *Cidade, Estado e Bairro*?\nEx: Portel, PA, Centro`);
         return true;
     }
 
-    // ── ONBOARDING_LOCALIZACAO: Cidade e Bairro do Lojista ───────────────────
+    // ── ONBOARDING_LOCALIZACAO: Cidade, Estado e Bairro do Lojista ───────────
     if (contexto.estado === EstadosFluxo.ONBOARDING_LOCALIZACAO) {
         const extraidos = userText.split(',').map(s => s.trim());
-        if (extraidos.length < 2) {
-            await sendTextMessage(from, 'Para melhor busca, envie sua Cidade e Bairro separados por vírgula.\nEx: Portel, Castanheira');
+        if (extraidos.length < 3) {
+            await sendTextMessage(from, 'Para melhor precisão, envie sua Cidade, Estado e Bairro separados por vírgula.\nEx: Portel, PA, Centro');
             return true;
         }
-        const [cidade, bairro] = extraidos;
-        const estado = detectarEstadoPorWhatsApp(from) || 'PA';
+        const [cidade, estado, bairro] = extraidos;
         await salvarContexto(from, {
             ...contexto,
             estado: EstadosFluxo.ONBOARDING_CATEGORIA,
-            dadosLojista: { ...contexto.dadosLojista, cidade, bairro, estado },
+            dadosLojista: { ...contexto.dadosLojista, cidade, estado, bairro },
         });
         await sendListMessage(from, 'Show! Para finalizar, qual a *Categoria* da sua loja?', 'Escolha a categoria', CATEGORIAS_MENU);
         return true;
@@ -152,12 +150,11 @@ export async function handleOnboarding(
     // ── ONBOARDING_CONSUMIDOR_LOCALIZACAO ────────────────────────────────────
     if (contexto.estado === EstadosFluxo.ONBOARDING_CONSUMIDOR_LOCALIZACAO) {
         const extraidos = userText.split(',').map(s => s.trim());
-        if (extraidos.length < 2) {
-            await sendTextMessage(from, 'Para encontrar as melhores ofertas, preciso da sua Cidade e Bairro separados por vírgula.\nEx: Portel, Castanheira');
+        if (extraidos.length < 3) {
+            await sendTextMessage(from, 'Para encontrar as melhores ofertas, preciso da sua Cidade, Estado e Bairro separados por vírgula.\nEx: Portel, PA, Centro');
             return true;
         }
-        const [cidade, bairro] = extraidos;
-        const estado = detectarEstadoPorWhatsApp(from) || 'PA';
+        const [cidade, estado, bairro] = extraidos;
 
         try {
             const { error } = await supabase.from('usuarios').upsert(
@@ -223,9 +220,10 @@ export async function handleOnboarding(
 
             // Propaga a loja recém-criada para o orquestrador
             setLoja(novaLoja);
-        } catch (err) {
-            logger.error({ err }, '[OnboardingAgent] Erro ao salvar loja');
-            await sendTextMessage(from, 'Vish, tive um probleminha técnico ao salvar sua loja. Pode tentar selecionar a Categoria novamente?');
+        } catch (err: any) {
+            const childLogger = criarLoggerConversa(from, contexto.estado);
+            childLogger.error({ err }, '[OnboardingAgent] Erro ao salvar loja');
+            await sendTextMessage(from, 'Vish, tive um probleminha técnico ao salvar sua loja. Verifique os dados ou tente novamente mais tarde.');
         }
         return true;
     }
