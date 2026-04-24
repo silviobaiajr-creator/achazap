@@ -180,6 +180,13 @@ async function verificarFugaGlobal(
 
     // Nível 3: NLP para frases coloquiais (apenas se há contexto ativo E não é botão interno)
     if (temContextoAtivo && userText && userText.length > 3 && !isConfirmacaoInterna) {
+        // Se estivermos na revisão de preços, bloqueia o NLP para mensagens que são majoritariamente números,
+        // para evitar que erros de digitação como "1 26,O0" sejam classificados como fuga.
+        if (contexto.estado === EstadosFluxo.AGUARDANDO_SELECAO_REVISAO) {
+            const numDigits = (userText.match(/\d/g) || []).length;
+            if (numDigits >= 2) return false; // Provavelmente é tentativa de preço
+        }
+
         const ehFuga = await detectarFugaNLP(userText);
         if (ehFuga) {
             await executarFuga(from, loja);
@@ -1054,80 +1061,94 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     // CENÁRIO: Seleção de item no Relatório de Revisão
     // ══════════════════════════════════════════════════════════
     if (contexto && contexto.estado === EstadosFluxo.AGUARDANDO_SELECAO_REVISAO) {
-        const lista = contexto.alteracoesPlanejadas ?? [];
+        
+        // Proteção contra mídias durante a revisão (Cenário 8)
+        if (!isTextOnly) {
+            await sendTextMessage(from, '🛑 Durante a revisão, por favor **digite** o número e o novo preço.\n\nÁudios e fotos são ideais para o Menu Inicial. Digite *0* se quiser cancelar a revisão.');
+            return;
+        }
 
-        // Detecta pares "número valor" na mensagem (ex: "1 8,50 2 15,00", "1- 8,50")
-        // Suporta separadores estendidos: espaço, tab, traço, dois pontos, barras.
-        const pairsRegex = /(\d+)[\s\-:=>*\/]+([\d]+[.,][\d]{1,2}|[\d]+)/g;
+        const lista: AlteracaoPlanejada[] = contexto.alteracoesPlanejadas ?? [];
+
+        // Escape explícito com '0' (Cenário 2)
+        if (userText.trim() === '0') {
+            await sendTextMessage(from, 'Revisão cancelada.');
+            await limparContexto(from);
+            await delay(400);
+            await enviarMenu(loja.nome, from);
+            return;
+        }
+
+        // Regex blindada: Exige que o preço termine ou tenha separadores válidos, bloqueando letras grudadas (ex: 26,O0)
+        // O (?=\s|$) garante que depois do número venha um espaço ou o fim da linha.
+        // Regex blindada: aceita separadores variados e prefixo R$ opcional.
+        // (?=\s|$|\n) garante que o preço não seja seguido de letras grudadas (ex: 26,O0).
+        const pairsRegex = /(?:^|\s)(\d+)[\s\-:=>*\/]+((?:R\$\s*)?\d+(?:[.,]\d{1,2})?)(?=\s|$|\n)/gi;
         const pares: { idx: number; preco: number }[] = [];
         let match: RegExpExecArray | null;
 
-        while ((match = pairsRegex.exec(userMessageText)) !== null) {
+        while ((match = pairsRegex.exec(userText)) !== null) {
             const idx   = parseInt(match[1]!, 10);
-            const preco = parseFloat(match[2]!.replace(',', '.'));
+            
+            // Troca vírgula por ponto e extrai só os números
+            const precoLimpo = match[2]!.replace(/[R$\s]/gi, '').replace(',', '.');
+            const preco = Number(precoLimpo); // Usando Number() que falha em NaN se houver letras no meio
+            
             if (!isNaN(idx) && !isNaN(preco) && idx >= 1 && idx <= lista.length && preco > 0) {
+                // Trava de Sanidade (Cenário 9)
+                if (preco > 5000) {
+                    await sendTextMessage(from, `⚠️ O valor de R$ ${preco.toFixed(2).replace('.', ',')} para o item ${idx} parece alto demais. Por segurança, digite novamente ou verifique se faltou a vírgula.`);
+                    return;
+                }
                 pares.push({ idx, preco });
             }
         }
 
-        if (isTextOnly && pares.length > 0) {
-            // Atualiza cada par no banco
+        if (pares.length > 0) {
             const resultados: string[] = [];
             for (const par of pares) {
                 const item = lista[par.idx - 1]!;
                 await atualizarPrecoLedger(loja.id, item.nome, par.preco, item.unidade);
                 resultados.push(`✅ *${par.idx}. ${item.nome}* → R$ ${par.preco.toFixed(2).replace('.', ',')} / ${item.unidade}`);
-                // Marca como atualizado na lista em memória
                 item.acao = 'sem_alteracao';
                 item.precoFoto = par.preco;
             }
 
             const atualizadosIds = new Set(pares.map(p => p.idx));
             const pendentes = lista.filter((_: AlteracaoPlanejada, i: number) => !atualizadosIds.has(i + 1));
-
-            // Feedback do que foi atualizado
             const feedbackMsg = `*Preços atualizados:*\n` + resultados.join('\n');
 
             if (pendentes.length === 0) {
-                // Todos concluídos!
                 await sendTextMessage(from, feedbackMsg + '\n\n🎉 *Todos os preços estão atualizados!* Obrigado por manter seu catálogo fresquinho.');
                 await limparContexto(from);
                 await delay(400);
                 await enviarMenu(loja.nome, from);
             } else {
-                // Ainda há pendentes — mostrar lista atualizada
                 let novaLista = `${feedbackMsg}\n\n📋 *Ainda pendentes:*\n`;
-                pendentes.forEach((item: AlteracaoPlanejada, i: number) => {
+                pendentes.forEach((item: AlteracaoPlanejada) => {
                     const idxOriginal = lista.indexOf(item) + 1;
                     const selo = calcularSeloFrescor(undefined);
-                    novaLista += `*${idxOriginal}. ${item.nome}* \u2014 R$ ${item.precoFoto.toFixed(2).replace('.', ',')} / ${item.unidade} ${selo}\n`;
+                    novaLista += `*${idxOriginal}. ${item.nome}* — R$ ${item.precoFoto.toFixed(2).replace('.', ',')} / ${item.unidade} ${selo}\n`;
                 });
                 novaLista += `\n✏️ _Ex: *${pendentes.map((_: AlteracaoPlanejada, i: number) => `${lista.indexOf(pendentes[i]!) + 1} 0,00`).slice(0, 2).join(' ')}_`;
-
-                await salvarContexto(from, {
-                    ...contexto,
-                    alteracoesPlanejadas: lista,
-                });
+                await salvarContexto(from, { ...contexto, alteracoesPlanejadas: lista });
                 await sendTextMessage(from, novaLista);
             }
             return;
         }
 
-        // Entrada não reconhecida — lembrar instrução
-        if (isTextOnly && userMessageText.trim().length > 0) {
-            const exemplo = lista.slice(0, 2).map((_: AlteracaoPlanejada, i: number) => `*${i + 1} - 0,00*`).join('\n');
+        // Se chegou aqui, isTextOnly é true, mas não encontrou pares válidos. (Cenários 5, 6, 7)
+        if (userText.trim().length > 0) {
+            const exemplo = lista.slice(0, 2).map((_: AlteracaoPlanejada, i: number) => `*${lista.indexOf(lista[i]!) + 1} 15,90*`).join('\n');
             await sendTextMessage(from,
-                `✍️ *Como atualizar preços:*\n` +
-                `Digite o número do item e o novo preço. Pode mandar um embaixo do outro:\n\n` +
-                `Exemplo:\n${exemplo}\n\n` +
-                `_Para voltar ao menu, digite *cancelar*._`
+                `🤔 Não consegui entender os valores. Lembre-se de colocar o **número do item** e depois o **preço**.\n\n` +
+                `Exemplo correto:\n${exemplo}\n\n` +
+                `🛑 _Digite 0 se quiser cancelar a revisão._`
             );
-            await delay(300);
-            await sendInteractiveButtons(from, 'Ou prefere sair agora?', [
-                { id: 'btn_cancelar', title: '↩️ Voltar ao Menu' }
-            ]);
             return;
         }
+
+        return; 
     }
 
     // ══════════════════════════════════════════════════════════
@@ -2045,7 +2066,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     }
 
     // Fallback Final: se nada capturou, envia menu para evitar silêncio (Zero-Silence)
-    logger.warn({ from, estado: contexto?.estado }, '[processMessage] Fallback Zero-Silence acionado');
+    logger.warn({ from, estado: contexto?.estado, userText }, '[processMessage] Fallback Zero-Silence acionado. Variaveis de depuracao ativadas.');
     await limparContexto(from);
     if (loja) await enviarMenu(loja.nome, from);
     else await sendTextMessage(from, 'Olá! Digite qualquer coisa para começar.');

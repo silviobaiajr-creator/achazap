@@ -131,21 +131,48 @@ export async function handleStore(
 
     // ── AGUARDANDO_SELECAO_REVISAO ────────────────────────────────────────────
     if (contexto?.estado === EstadosFluxo.AGUARDANDO_SELECAO_REVISAO) {
+        
+        // Proteção contra mídias durante a revisão (Cenário 8)
+        if (!isTextOnly) {
+            await sendTextMessage(from, '🛑 Durante a revisão, por favor **digite** o número e o novo preço.\n\nÁudios e fotos são ideais para o Menu Inicial. Digite *0* se quiser cancelar a revisão.');
+            return true;
+        }
+
         const lista: AlteracaoPlanejada[] = contexto.alteracoesPlanejadas ?? [];
 
-        const pairsRegex = /(\d+)[\s\-:=>*\/]+([\d]+[.,][\d]{1,2}|[\d]+)/g;
+        // Escape explícito com '0' (Cenário 2)
+        if (userMessageText.trim() === '0') {
+            await sendTextMessage(from, 'Revisão cancelada.');
+            await limparContexto(from);
+            await delay(400);
+            await enviarMenu(loja.nome, from);
+            return true;
+        }
+
+        // Regex blindada: Exige que o preço termine ou tenha separadores válidos, bloqueando letras grudadas (ex: 26,O0)
+        // O (?=\s|$) garante que depois do número venha um espaço ou o fim da linha.
+        const pairsRegex = /(?:^|\s)(\d+)[\s\-:=>*\/]+(R\$?\s*\d+(?:[.,]\d{1,2})?)(?=\s|$)/gi;
         const pares: { idx: number; preco: number }[] = [];
         let match: RegExpExecArray | null;
 
         while ((match = pairsRegex.exec(userMessageText)) !== null) {
             const idx   = parseInt(match[1]!, 10);
-            const preco = parseFloat(match[2]!.replace(',', '.'));
+            
+            // Troca vírgula por ponto e extrai só os números
+            const precoLimpo = match[2]!.replace(/[R$\s]/gi, '').replace(',', '.');
+            const preco = Number(precoLimpo); // Usando Number() que falha em NaN se houver letras no meio
+            
             if (!isNaN(idx) && !isNaN(preco) && idx >= 1 && idx <= lista.length && preco > 0) {
+                // Trava de Sanidade (Cenário 9)
+                if (preco > 5000) {
+                    await sendTextMessage(from, `⚠️ O valor de R$ ${preco.toFixed(2).replace('.', ',')} para o item ${idx} parece alto demais. Por segurança, digite novamente ou verifique se faltou a vírgula.`);
+                    return true;
+                }
                 pares.push({ idx, preco });
             }
         }
 
-        if (isTextOnly && pares.length > 0) {
+        if (pares.length > 0) {
             const resultados: string[] = [];
             for (const par of pares) {
                 const item = lista[par.idx - 1]!;
@@ -178,22 +205,18 @@ export async function handleStore(
             return true;
         }
 
-        if (isTextOnly && userMessageText.trim().length > 0) {
-            const exemplo = lista.slice(0, 2).map((_: AlteracaoPlanejada, i: number) => `*${i + 1} - 0,00*`).join('\n');
+        // Se chegou aqui, isTextOnly é true, mas não encontrou pares válidos. (Cenários 5, 6, 7)
+        if (userMessageText.trim().length > 0) {
+            const exemplo = lista.slice(0, 2).map((_: AlteracaoPlanejada, i: number) => `*${lista.indexOf(lista[i]!) + 1} 15,90*`).join('\n');
             await sendTextMessage(from,
-                `✍️ *Como atualizar preços:*\n` +
-                `Digite o número do item e o novo preço. Pode mandar um embaixo do outro:\n\n` +
-                `Exemplo:\n${exemplo}\n\n` +
-                `_Para voltar ao menu, digite *cancelar*._`
+                `🤔 Não consegui entender os valores. Lembre-se de colocar o **número do item** e depois o **preço**.\n\n` +
+                `Exemplo correto:\n${exemplo}\n\n` +
+                `🛑 _Digite 0 se quiser cancelar a revisão._`
             );
-            await delay(300);
-            await sendInteractiveButtons(from, 'Ou prefere sair agora?', [
-                { id: 'btn_cancelar', title: '↩️ Voltar ao Menu' },
-            ]);
             return true;
         }
 
-        return false; // deixa o InventoryAgent tratar (ex: botão de confirmação)
+        return true; 
     }
 
     return false;
