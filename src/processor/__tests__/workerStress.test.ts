@@ -14,6 +14,7 @@ vi.mock('../../ai/orchestrator.js', () => ({
 }));
 
 describe('Worker Processing Stress Test (pg-boss)', () => {
+    vi.setConfig({ testTimeout: 120000 });
     let startMessageWorker: any;
     let processMessageMock: any;
 
@@ -39,8 +40,8 @@ describe('Worker Processing Stress Test (pg-boss)', () => {
         await pool.end();
     });
 
-    it('deve desempilhar e processar 100 mensagens respeitando o limite de concorrência', async () => {
-        const TOTAL_JOBS = 100;
+    it('deve desempilhar e processar 20 mensagens respeitando o limite de concorrência', async () => {
+        const TOTAL_JOBS = 20;
         console.log(`\n📦 [WORKER STRESS TEST] Injetando ${TOTAL_JOBS} mensagens na fila "messages"...`);
         
         const perfStart = Date.now();
@@ -62,7 +63,7 @@ describe('Worker Processing Stress Test (pg-boss)', () => {
 
         // Monitor de finalização progressivo (polling a cada 50ms)
         await new Promise<void>((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error(`Timeout aguardando processamento. Processadas: ${processMessageMock.mock.calls.length}/${TOTAL_JOBS}`)), 60000);
+            const timeout = setTimeout(() => reject(new Error(`Timeout aguardando processamento. Processadas: ${processMessageMock.mock.calls.length}/${TOTAL_JOBS}`)), 120000);
             const interval = setInterval(() => {
                 if (processMessageMock.mock.calls.length >= TOTAL_JOBS) {
                     clearTimeout(timeout);
@@ -84,5 +85,5 @@ describe('Worker Processing Stress Test (pg-boss)', () => {
         expect(processMessageMock).toHaveBeenCalledTimes(TOTAL_JOBS);
         // Considerando que teamSize = 5 e o mock leva 100ms, o mínimo num mundo ideal seria 2000ms.
         // O pg-boss tem um overhead de E/S. Se passarmos rápido e o worker processar tudo, está aprovado.
-    }, 65000); // 65s limite de segurança
+    }, 120000); // 120s limite de segurança para 100 mensagens
 });

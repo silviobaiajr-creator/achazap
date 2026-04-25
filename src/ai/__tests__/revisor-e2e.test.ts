@@ -110,6 +110,8 @@ function getLatestMessage() { return sentMessages.join(' | '); }
 // ── SUÍTE DE TESTES ──────────────────────────────────────────────────────────
 
 describe('Revisor de Preços - Bateria Caótica (E2E)', () => {
+    // Aumenta o timeout para 60s pois faz chamadas REAIS ao Supabase e Gemini
+    vi.setConfig({ testTimeout: 60000 });
     beforeEach(async () => {
         sentMessages = [];
         currentPhone = `5591${Math.floor(100000000 + Math.random() * 900000000)}`;

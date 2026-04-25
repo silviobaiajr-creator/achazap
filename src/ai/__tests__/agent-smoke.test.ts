@@ -1,233 +1,132 @@
-/**
- * src/ai/__tests__/agent-smoke.test.ts
- * Smoke Test da Fase 2 de Refatoração — Agentes Especialistas.
- *
- * Valida que cada agente:
- * 1. Retorna true (consumiu) quando é do seu domínio.
- * 2. Retorna false (passa adiante) quando NÃO é do seu domínio.
- * 3. Não emite nenhum erro de compilação ou runtime.
- *
- * Execução: npx tsx src/ai/__tests__/agent-smoke.test.ts
- * Saída esperada: ✅ 12/12 testes passando
- */
-
-import 'dotenv/config';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { handleInventory } from '../agents/inventory-agent.js';
+import { handleOnboarding } from '../agents/onboarding-agent.js';
+import { EstadosFluxo } from '../types.js';
 
 // ── Mocks de dependências externas ───────────────────────────────────────────
 let sentMessages: string[] = [];
 let savedContexts: Record<string, any> = {};
-let clearedContexts: string[] = [];
 
-// Mock WhatsApp
-const mockWhatsApp = {
-    sendTextMessage: async (to: string, text: string) => { sentMessages.push(`[TEXT→${to}] ${text.substring(0, 60)}`); },
-    sendInteractiveButtons: async (to: string, body: string, _buttons: any[]) => { sentMessages.push(`[BTNS→${to}] ${body.substring(0, 60)}`); },
-    sendListMessage: async (to: string, body: string) => { sentMessages.push(`[LIST→${to}] ${body.substring(0, 60)}`); },
-    sendReaction: async () => {},
-    downloadMedia: async () => Buffer.from(''),
-    sendCTAUrlMessage: async () => {},
-};
+vi.mock('../../lib/whatsapp.js', () => ({
+    sendTextMessage: vi.fn(async (to, text) => { sentMessages.push(`[TEXT] ${text}`); }),
+    sendInteractiveButtons: vi.fn(async (to, text) => { sentMessages.push(`[BTNS] ${text}`); }),
+    sendListMessage: vi.fn(async (to, text) => { sentMessages.push(`[LIST] ${text}`); }),
+    sendReaction: vi.fn(),
+    downloadMedia: vi.fn(),
+    sendCTAUrlMessage: vi.fn(),
+}));
 
-// Mock Redis
-const mockRedis = {
-    salvarContexto: async (wa: string, ctx: any) => { savedContexts[wa] = ctx; },
-    lerContexto: async (wa: string) => savedContexts[wa] || null,
-    limparContexto: async (wa: string) => { clearedContexts.push(wa); delete savedContexts[wa]; },
-    renovarTTLContexto: async () => {},
+vi.mock('../../lib/redis-cloud.js', () => ({
+    salvarContexto: vi.fn(async (wa, ctx) => { savedContexts[wa] = ctx; }),
+    lerContexto: vi.fn(async (wa) => savedContexts[wa] || null),
+    limparContexto: vi.fn(async (wa) => { delete savedContexts[wa]; }),
+    renovarTTLContexto: vi.fn(),
     cache: { get: () => null, set: () => {}, delete: () => {} },
+}));
+
+const mockChainable = {
+    select: vi.fn().mockReturnThis(),
+    eq: vi.fn().mockReturnThis(),
+    single: vi.fn().mockResolvedValue({ data: null, error: null }),
+    maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+    upsert: vi.fn().mockResolvedValue({ data: null, error: null }),
 };
 
-// ── Helpers de teste ──────────────────────────────────────────────────────────
-let passed = 0;
-let failed = 0;
-
-function reset() {
-    sentMessages = [];
-    savedContexts = {};
-    clearedContexts = [];
-}
-
-async function test(name: string, fn: () => Promise<void>) {
-    reset();
-    try {
-        await fn();
-        console.log(`  ✅ ${name}`);
-        passed++;
-    } catch (err: any) {
-        console.error(`  ❌ ${name}: ${err.message}`);
-        failed++;
+vi.mock('../../lib/supabase.js', () => ({
+    supabaseAdmin: {
+        from: vi.fn(() => mockChainable),
     }
-}
+}));
 
-function assert(condition: boolean, message: string) {
-    if (!condition) throw new Error(message);
-}
-
-// ── Importações dos Agentes (sem mocks de módulo — testa integração real) ────
-import { EstadosFluxo } from '../types.js';
-
-// ── Montagem de mensagem fake ─────────────────────────────────────────────────
-function makeMsg(type: string, text?: string, buttonId?: string): any {
-    return {
-        from: '559100000001',
-        id: 'msg_test_001',
-        type,
-        text: text ? { body: text } : undefined,
-        interactive: buttonId ? {
-            button_reply: { id: buttonId, title: buttonId },
-        } : undefined,
-    };
-}
-
-const LOJA_FAKE = { id: 'loja-test-001', nome: 'Mercado Teste', cidade: 'Belém', bairro: 'Nazaré', estado: 'PA' };
-const FROM = '559100000001';
-
-// ════════════════════════════════════════════════════════════════════════════════
-// TESTES
-// ════════════════════════════════════════════════════════════════════════════════
-
-async function runAll() {
-    console.log('\n🔬 Smoke Test — Agentes da Fase 2\n');
-
-    // ── Importações (verificação de módulo) ──
-    await test('T01: shared.ts — enviarMenu importa corretamente', async () => {
-        const { enviarMenu, executarFuga, buscarPerfilLoja, verificarFugaGlobal } = await import('../shared.js');
-        assert(typeof enviarMenu === 'function', 'enviarMenu não é função');
-        assert(typeof executarFuga === 'function', 'executarFuga não é função');
-        assert(typeof buscarPerfilLoja === 'function', 'buscarPerfilLoja não é função');
-        assert(typeof verificarFugaGlobal === 'function', 'verificarFugaGlobal não é função');
-    });
-
-    await test('T02: OnboardingAgent importa corretamente', async () => {
-        const { handleOnboarding } = await import('../agents/onboarding-agent.js');
-        assert(typeof handleOnboarding === 'function', 'handleOnboarding não é função');
-    });
-
-    await test('T03: StoreAgent importa corretamente', async () => {
-        const { handleStore } = await import('../agents/store-agent.js');
-        assert(typeof handleStore === 'function', 'handleStore não é função');
-    });
-
-    await test('T04: ConsumerAgent importa corretamente', async () => {
-        const { handleConsumer } = await import('../agents/consumer-agent.js');
-        assert(typeof handleConsumer === 'function', 'handleConsumer não é função');
-    });
-
-    await test('T05: InventoryAgent importa corretamente', async () => {
-        const { handleInventory } = await import('../agents/inventory-agent.js');
-        assert(typeof handleInventory === 'function', 'handleInventory não é função');
-    });
-
-    // ── Teste de Roteamento: Onboarding retorna false quando loja existe ──────
-    await test('T06: OnboardingAgent — retorna false quando loja já existe', async () => {
-        const { handleOnboarding } = await import('../agents/onboarding-agent.js');
-        const result = await handleOnboarding(
-            makeMsg('text', 'oi'),
-            FROM,
-            LOJA_FAKE,    // loja existe → deve retornar false
-            null,
-            'oi',
-            '',
-            () => {}
-        );
-        assert(result === false, `Esperava false, recebeu ${result}`);
-    });
-
-    // ── Teste: StoreAgent não captura quando não é seu domínio ───────────────
-    await test('T07: StoreAgent — retorna false para AGUARDANDO_DADOS_PRODUTO', async () => {
-        const { handleStore } = await import('../agents/store-agent.js');
-        const ctx = { estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO };
-        const result = await handleStore(
-            makeMsg('text', 'Arroz 8,00'),
-            FROM,
-            LOJA_FAKE,
-            ctx as any,
-            'Arroz 8,00',
-            '',
-            false,
-            true,
-        );
-        assert(result === false, `Esperava false, recebeu ${result}`);
-    });
-
-    // ── Teste: ConsumerAgent retorna false quando loja existe ─────────────────
-    await test('T08: ConsumerAgent — retorna false quando loja existe', async () => {
-        const { handleConsumer } = await import('../agents/consumer-agent.js');
-        const ctx = { estado: EstadosFluxo.CONSUMIDOR_IDLE };
-        const result = await handleConsumer(
-            makeMsg('text', 'quero leite'),
-            FROM,
-            LOJA_FAKE,  // loja existe → consumidor não é seu domínio
-            ctx as any,
-            'quero leite',
-            '',
-            true,
-        );
-        assert(result === false, `Esperava false, recebeu ${result}`);
-    });
-
-    // ── Teste: InventoryAgent retorna false para CONSUMIDOR_IDLE ─────────────
-    await test('T09: InventoryAgent — retorna false para estado de consumidor', async () => {
-        const { handleInventory } = await import('../agents/inventory-agent.js');
-        const ctx = { estado: EstadosFluxo.CONSUMIDOR_IDLE };
-        const result = await handleInventory(
-            makeMsg('text', 'leite'),
-            FROM,
-            LOJA_FAKE,
-            ctx as any,
-            'leite',
-            '',
-            false,
-            true,
-            false,
-            async () => {},
-        );
-        assert(result === false, `Esperava false, recebeu ${result}`);
-    });
-
-    // ── Testes de contratos de interface ──────────────────────────────────────
-    await test('T10: Todos os agentes aceitam os mesmos parâmetros base', async () => {
-        const { handleOnboarding } = await import('../agents/onboarding-agent.js');
-        const { handleStore }      = await import('../agents/store-agent.js');
-        const { handleConsumer }   = await import('../agents/consumer-agent.js');
-        const { handleInventory }  = await import('../agents/inventory-agent.js');
-        // Se os imports acima funcionaram sem exceção TypeScript, o contrato está correto
-        assert(true, 'contratos ok');
-    });
-
-    // ── Teste de Compilação: tipos inferidos ──────────────────────────────────
-    await test('T11: EstadosFluxo possui todos os estados esperados', async () => {
-        const estados = [
-            'IDLE', 'ONBOARDING_PERFIL', 'ONBOARDING_NOME', 'ONBOARDING_LOCALIZACAO',
-            'ONBOARDING_CATEGORIA', 'ONBOARDING_CONSUMIDOR_LOCALIZACAO', 'CONSUMIDOR_IDLE',
-            'AGUARDANDO_DADOS_PRODUTO', 'AGUARDANDO_ACAO_SIMILARES', 'AGUARDANDO_ACAO_PRODUTO_SELECIONADO',
-            'AGUARDANDO_DADOS_OFERTA', 'AGUARDANDO_CONFIRMACAO_NOME', 'AGUARDANDO_CONFIRMACAO_ALTERACOES',
-            'AGUARDANDO_SELECAO_EDICAO', 'AGUARDANDO_NOVO_PRECO_EDICAO', 'AGUARDANDO_NOVO_NOME_EDICAO',
-            'AGUARDANDO_SELECAO_REVISAO', 'AGUARDANDO_QUANTIDADE_EMBALAGEM',
-        ];
-        for (const e of estados) {
-            assert(e in EstadosFluxo, `Estado ${e} não encontrado em EstadosFluxo`);
+vi.mock('../../lib/gemini.js', () => ({
+    ai: {
+        models: {
+            generateContent: vi.fn().mockResolvedValue({
+                text: JSON.stringify({ escolha: 1, cancelar: false }),
+                usageMetadata: { totalTokenCount: 100 }
+            }),
         }
+    },
+    GEMINI_MODEL: 'gemini-1.5-flash',
+}));
+
+describe('Smoke Test — Agentes da Fase 2', () => {
+    const FROM = '5511999999999';
+    const LOJA = { id: 'loja_123', nome: 'Loja Teste' };
+    const mockReprocess = vi.fn();
+
+    beforeEach(() => {
+        sentMessages = [];
+        savedContexts = {};
+        vi.clearAllMocks();
+        // Reset mocks chainables
+        mockChainable.single.mockResolvedValue({ data: null, error: null });
+        mockChainable.maybeSingle.mockResolvedValue({ data: null, error: null });
     });
 
-    await test('T12: Compilação TypeScript sem erros (via import dinâmico)', async () => {
-        // Se todos os imports acima funcionaram, o TS compilou corretamente.
-        // Esta é a verificação final de integridade.
-        assert(passed >= 11, 'Menos de 11 testes passaram antes deste — verifique erros acima.');
+    it('Scenario 1: InventoryAgent deve ignorar se estado for IDLE', async () => {
+        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: 'Oi' } } as any, FROM, LOJA, { estado: EstadosFluxo.IDLE }, 'Oi', '', mockReprocess);
+        expect(consumed).toBe(false);
     });
 
-    // ── Resultado ─────────────────────────────────────────────────────────────
-    console.log(`\n${'─'.repeat(50)}`);
-    console.log(`📊 Resultado: ${passed}/${passed + failed} passando`);
-    if (failed > 0) {
-        console.error(`\n⚠️  ${failed} teste(s) falharam. Corrija antes de fazer commit.\n`);
-        process.exit(1);
-    } else {
-        console.log('\n🎉 Todos os testes passando! Seguro para commit.\n');
-    }
-}
+    it('Scenario 2: InventoryAgent deve consumir se estado for AGUARDANDO_DADOS_PRODUTO', async () => {
+        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: 'Arroz 10' } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO }, 'Arroz 10', '', mockReprocess);
+        expect(consumed).toBe(true);
+    });
 
-runAll().catch(err => {
-    console.error('❌ Erro fatal no smoke test:', err);
-    process.exit(1);
+    it('Scenario 3: InventoryAgent deve consumir se estado for AGUARDANDO_ACAO_SIMILARES', async () => {
+        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: '1' } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_ACAO_SIMILARES, similaresEncontrados: [{}] }, '1', '', mockReprocess);
+        expect(consumed).toBe(true);
+    });
+
+    it('Scenario 4: InventoryAgent deve consumir se estado for AGUARDANDO_ACAO_PRODUTO_SELECIONADO', async () => {
+        const consumed = await handleInventory({ from: FROM, type: 'interactive', interactive: { button_reply: { id: 'acao_atualizar' } } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_ACAO_PRODUTO_SELECIONADO, dadosProduto: { nome: 'X' } }, '', 'acao_atualizar', mockReprocess);
+        expect(consumed).toBe(true);
+    });
+
+    it('Scenario 5: InventoryAgent deve consumir se estado for AGUARDANDO_CONFIRMACAO_ALTERACOES', async () => {
+        const consumed = await handleInventory({ from: FROM, type: 'interactive', interactive: { button_reply: { id: 'confirmar_alteracoes_sim' } } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES }, '', 'confirmar_alteracoes_sim', mockReprocess);
+        expect(consumed).toBe(true);
+    });
+
+    it('Scenario 6: InventoryAgent deve consumir se estado for AGUARDANDO_SELECAO_EDICAO', async () => {
+        // Enviar '1' para o item de índice 0 (pois '1' é o label visual)
+        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: '1' } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_SELECAO_EDICAO, alteracoesPlanejadas: [{ nome: 'Item 1' }] }, '1', '', mockReprocess);
+        expect(consumed).toBe(true);
+    });
+
+    it('Scenario 7: OnboardingAgent deve consumir se não houver loja nem contexto', async () => {
+        const consumed = await handleOnboarding({ from: FROM, type: 'text', text: { body: 'Oi' } } as any, FROM, null, null, 'Oi', '', (l) => {});
+        expect(consumed).toBe(true);
+        expect(sentMessages[0]).toContain('AchaZap');
+    });
+
+    it('Scenario 8: OnboardingAgent deve ignorar se a loja já existir', async () => {
+        const consumed = await handleOnboarding({ from: FROM, type: 'text', text: { body: 'Oi' } } as any, FROM, LOJA, { estado: EstadosFluxo.IDLE }, 'Oi', '', (l) => {});
+        expect(consumed).toBe(false);
+    });
+
+    it('Scenario 9: OnboardingAgent deve consumir se estiver em ONBOARDING_NOME', async () => {
+        const consumed = await handleOnboarding({ from: FROM, type: 'text', text: { body: 'Minha Loja' } } as any, FROM, null, { estado: EstadosFluxo.ONBOARDING_NOME }, 'Minha Loja', '', (l) => {});
+        expect(consumed).toBe(true);
+    });
+
+    it('Scenario 10: InventoryAgent deve falhar graciosamente se dadosProduto sumirem', async () => {
+        const consumed = await handleInventory({ from: FROM, type: 'interactive', interactive: { button_reply: { id: 'acao_atualizar' } } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_ACAO_PRODUTO_SELECIONADO, dadosProduto: null }, '', 'acao_atualizar', mockReprocess);
+        expect(consumed).toBe(true);
+        expect(sentMessages[0]).toContain('Sessão expirada');
+    });
+
+    it('Scenario 11: InventoryAgent deve processar 0 (remover) no AGUARDANDO_NOVO_PRECO_EDICAO', async () => {
+        const ctx = { estado: EstadosFluxo.AGUARDANDO_NOVO_PRECO_EDICAO, acao: '0', alteracoesPlanejadas: [{ nome: 'X', precoFoto: 10 }] };
+        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: '0' } } as any, FROM, LOJA, ctx, '0', '', mockReprocess);
+        expect(consumed).toBe(true);
+        expect(sentMessages[0]).toContain('removeu todos os itens');
+    });
+
+    it('Scenario 12: OnboardingAgent deve ignorar se for consumidor cadastrado', async () => {
+        mockChainable.maybeSingle.mockResolvedValueOnce({ data: { id: 'user_123' }, error: null });
+        const consumed = await handleOnboarding({ from: FROM, type: 'text', text: { body: 'Oi' } } as any, FROM, null, null, 'Oi', '', (l) => {});
+        expect(consumed).toBe(false);
+    });
 });
