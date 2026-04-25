@@ -91,7 +91,7 @@ describe('Smoke Test — Agentes da Fase 2', () => {
 
     it('Scenario 6: InventoryAgent deve consumir se estado for AGUARDANDO_SELECAO_EDICAO', async () => {
         // Enviar '1' para o item de índice 0 (pois '1' é o label visual)
-        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: '1' } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_SELECAO_EDICAO, alteracoesPlanejadas: [{ nome: 'Item 1' }] }, '1', '', mockReprocess);
+        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: '1' } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_SELECAO_EDICAO, alteracoesPlanejadas: [{ nome: 'Item 1', precoFoto: 10.0 }] }, '1', '', mockReprocess);
         expect(consumed).toBe(true);
     });
 

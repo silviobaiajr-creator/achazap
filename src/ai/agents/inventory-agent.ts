@@ -371,12 +371,12 @@ async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: 
 
     // Se veio do IDLE e não há similares: vai direto para lote de 1 (confirmação sem ambiguidade)
     // Se veio do IDLE mas há similares: vai para os botões diretamente (sem o card de resumo intermediário)
-    if (contexto.estado === EstadosFluxo.IDLE && similares.length === 0) {
+    if (contexto.estado === EstadosFluxo.IDLE && (similares?.length ?? 0) === 0) {
         await processarLoteProdutos(from, loja, [produto], contexto);
         return;
     }
 
-    if (similares.length > 0) {
+    if ((similares?.length ?? 0) > 0) {
         await salvarContexto(from, {
             ...contexto,
             estado: EstadosFluxo.AGUARDANDO_ACAO_SIMILARES,
@@ -387,7 +387,7 @@ async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: 
         });
 
         // UX Melhoria 1: Para 1 ou 2 similares, usar botões interativos
-        if (similares.length <= 2) {
+        if ((similares?.length ?? 0) <= 2) {
             const botoes: Array<{ id: string; title: string }> = similares.map((s, i) => ({
                 id: String(i + 1),
                 title: `✅ ${s.produto_nome.substring(0, 20)}`,
@@ -464,6 +464,31 @@ export async function handleInventory(
 ): Promise<boolean> {
     if (!loja || !contexto) return false;
     if (!INVENTORY_STATES.has(contexto.estado)) return false;
+
+    // ══════════════════════════════════════════════════════════
+    // ARMADILHA 11: Handler de Embalagem Coletiva sem Quantidade
+    // O lojista respondeu "24 latas" após a pergunta de quantidade
+    // ══════════════════════════════════════════════════════════
+    if (contexto.estado === EstadosFluxo.AGUARDANDO_QUANTIDADE_EMBALAGEM && isTextOnly && userMessageText) {
+        const produtoBase = contexto.dadosProduto;
+        if (produtoBase?.nome && produtoBase?.preco) {
+            const quantidadeTrimada = userMessageText.trim().substring(0, 30);
+            const produtoEnriquecido = {
+                nome: `${produtoBase.nome} (${quantidadeTrimada})`.substring(0, 250),
+                preco: produtoBase.preco as number,
+                unidade: (produtoBase.unidade || 'un') as string,
+            };
+            const ctxNormal = { ...contexto, estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO, dadosProduto: produtoEnriquecido };
+            await salvarContexto(from, ctxNormal);
+            await avançarParaSimilaresOuSalvar(from, loja, ctxNormal, produtoEnriquecido);
+            return true;
+        }
+        await limparContexto(from);
+        await sendTextMessage(from, '😕 Não consegui recuperar o produto anterior. Por favor, envie novamente com a quantidade inclusa.');
+        await delay(300);
+        await enviarMenu(loja.id, from); // Usando loja.id ou loja.nome? enviarMenu usa nome.
+        return true;
+    }
 
     // ══════════════════════════════════════════════════════════
     // CENÁRIO 13: Confirmação semântica/ortográfica ("Você quis dizer...?")
@@ -764,7 +789,7 @@ export async function handleInventory(
         });
 
         await sendInteractiveButtons(from, 
-            `Item: *${itemEscolhido.nome}*\nPreço atual: R$ ${itemEscolhido.precoFoto.toFixed(2).replace('.', ',')}\n\nO que deseja alterar?`,
+            `Item: *${itemEscolhido.nome}*\nPreço atual: R$ ${(itemEscolhido.precoFoto ?? 0).toFixed(2).replace('.', ',')}\n\nO que deseja alterar?`,
             [
                 { id: `edit_nome_${indiceReal}`, title: '✏️ Nome' },
                 { id: `edit_preco_${indiceReal}`, title: '💰 Preço' },

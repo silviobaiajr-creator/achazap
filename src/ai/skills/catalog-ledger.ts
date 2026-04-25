@@ -187,10 +187,6 @@ Retorne APENAS um array JSON com os índices dos itens correspondentes (começan
         return [];
     }
 }
-imilares] Erro no reranking Gemini — retornando vazio por segurança');
-        return [];
-    }
-}
 
 // ============================================================
 // INGESTÃO (UPSERT + histórico)

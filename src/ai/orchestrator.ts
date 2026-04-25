@@ -48,6 +48,7 @@ import { processarRevisaoPrecos, calcularSeloFrescor } from './skills/revisor.js
 import { processarMidia, processLoteProdutos, formatarCartaoProduto } from './skills/vision-processor.js';
 import { handleOnboarding } from './agents/onboarding-agent.js';
 import { handleInventory, processarDadosProduto, avançarParaSimilaresOuSalvar } from './agents/inventory-agent.js';
+import { handleRevisor } from './agents/revisor-agent.js';
 // ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -305,6 +306,16 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
     logger.debug({ from, estado: contexto?.estado ?? 'IDLE', tipo: msg.type, texto: userMessageText || '[media]' }, '[processMessage]');
 
+    // ── RevisorAgent: delega revisão de preços (Sprint Validade) ────────────────
+    if (await handleRevisor(msg, from, loja, contexto, userMessageText, buttonId, isInteractive, isTextOnly, isMediaOnly)) {
+        return;
+    }
+
+    // ── InventoryAgent: delega estados de inventário ──────────────────────────
+    if (await handleInventory(msg, from, loja, contexto, userMessageText, buttonId, isInteractive, isTextOnly, isMediaOnly, processMessage)) {
+        return;
+    }
+
     // ══════════════════════════════════════════════════════════
     // MODO CONSUMIDOR: BLIND SEARCH + CROSS SELL
     // ══════════════════════════════════════════════════════════
@@ -548,29 +559,6 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         return;
     }
 
-    // ══════════════════════════════════════════════════════════
-    // ARMADILHA 11: Handler de Embalagem Coletiva sem Quantidade
-    // O lojista respondeu "24 latas" após a pergunta de quantidade
-    // ══════════════════════════════════════════════════════════
-    if (contexto?.estado === EstadosFluxo.AGUARDANDO_QUANTIDADE_EMBALAGEM && isTextOnly && userMessageText) {
-        const produtoBase = contexto.dadosProduto;
-        if (produtoBase?.nome && produtoBase?.preco) {
-            const quantidadeTrimada = userMessageText.trim().substring(0, 30);
-            const produtoEnriquecido = {
-                nome: `${produtoBase.nome} (${quantidadeTrimada})`.substring(0, 250),
-                preco: produtoBase.preco as number,
-                unidade: (produtoBase.unidade || 'un') as string,
-            };
-            const ctxNormal = { ...contexto, estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO };
-            await salvarContexto(from, ctxNormal);
-            await avançarParaSimilaresOuSalvar(from, loja, ctxNormal, produtoEnriquecido);
-            return;
-        }
-        await limparContexto(from);
-        await sendTextMessage(from, '😕 Não consegui recuperar o produto anterior. Por favor, envie novamente com a quantidade inclusa.');
-        await enviarMenu(loja.nome, from);
-        return;
-    }
 
     // ══════════════════════════════════════════════════════════
     // INTERCEPTADOR GLOBAL: Comandos especiais (qualquer estado)
@@ -646,128 +634,6 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
     // ══════════════════════════════════════════════════════════
     // CENÁRIO: Seleção de item no Relatório de Revisão
-    // ══════════════════════════════════════════════════════════
-    if (contexto && contexto.estado === EstadosFluxo.AGUARDANDO_SELECAO_REVISAO) {
-        
-        // Proteção contra mídias durante a revisão (Cenário 8)
-        const lista: AlteracaoPlanejada[] = contexto.alteracoesPlanejadas ?? [];
-
-        if (!isTextOnly) {
-            let msgErro = '🛑 *Revisão em andamento:* Durante a revisão, por favor **digite** o número e o novo preço.\n\n' +
-                          'Áudios e fotos são ideais para o Menu Inicial. Digite *0* se quiser cancelar.\n\n' +
-                          '📋 *Ainda pendentes:*\n';
-            
-            lista.forEach((item: AlteracaoPlanejada, i: number) => {
-                const selo = calcularSeloFrescor(item.dataReferencia);
-                msgErro += `*${i + 1}. ${item.nome}* — R$ ${item.precoFoto.toFixed(2).replace('.', ',')} / ${item.unidade} ${selo}\n`;
-            });
-
-            await sendTextMessage(from, msgErro);
-            return;
-        }
-
-        // Escape explícito com '0' (Cenário 2)
-        if (userText.trim() === '0') {
-            await sendTextMessage(from, 'Revisão cancelada.');
-            await limparContexto(from);
-            await delay(400);
-            await enviarMenu(loja.nome, from);
-            return;
-        }
-
-        // Regex blindada: Exige que o preço termine ou tenha separadores válidos, bloqueando letras grudadas (ex: 26,O0)
-        // O (?=\s|$) garante que depois do número venha um espaço ou o fim da linha.
-        // Regex blindada: aceita separadores variados e prefixo R$ opcional.
-        // (?=\s|$|\n) garante que o preço não seja seguido de letras grudadas (ex: 26,O0).
-        // Regex simplificada para capturar o bloco de preço completo (incluindo milhar)
-        const pairsRegex = /(?:^|\s)(\d+)[\s\-:=>*\/]+((?:R\$\s*)?[\d.,]+)(?=\s|$|\n)/gi;
-        const pares: { idx: number; preco: number }[] = [];
-        let match: RegExpExecArray | null;
-
-        while ((match = pairsRegex.exec(userText)) !== null) {
-            const idx   = parseInt(match[1]!, 10);
-            
-            // Parser Inteligente:
-            // 1. Remove R$ e espaços
-            // 2. Se houver vírgula, assume que é o decimal e remove todos os pontos (milhar)
-            let rawPreco = match[2]!.replace(/[R$\s]/gi, '');
-            if (rawPreco.includes(',')) {
-                rawPreco = rawPreco.replace(/\./g, '').replace(',', '.');
-            }
-            
-            const preco = Number(rawPreco);
-            
-            if (!isNaN(idx) && !isNaN(preco) && idx >= 1 && idx <= lista.length && preco > 0) {
-                // Trava de Sanidade (Cenário 9)
-                if (preco > 5000) {
-                    await sendTextMessage(from, `⚠️ O valor de R$ ${preco.toFixed(2).replace('.', ',')} para o item ${idx} parece alto demais. Por segurança, digite novamente ou verifique se faltou a vírgula.`);
-                    return;
-                }
-                pares.push({ idx, preco });
-            }
-        }
-
-        if (pares.length > 0) {
-            // Cenário 13: Detecção de Índices Repetidos
-            const idsUnicos = new Set(pares.map(p => p.idx));
-            if (idsUnicos.size < pares.length) {
-                await sendTextMessage(from, `⚠️ *Atenção:* Você lançou preços diferentes para o mesmo item. Por favor, corrija e envie novamente.\n\n_Ex: Se o item 1 mudou para R$ 10,00, mande apenas "1 10,00"._`);
-                return;
-            }
-
-            const resultados: string[] = [];
-            for (const par of pares) {
-                const item = lista[par.idx - 1]!;
-                await atualizarPrecoLedger(loja.id, item.nome, par.preco, item.unidade);
-                resultados.push(`✅ *${par.idx}. ${item.nome}* → R$ ${par.preco.toFixed(2).replace('.', ',')} / ${item.unidade}`);
-                item.acao = 'sem_alteracao';
-                item.precoFoto = par.preco;
-            }
-
-            const atualizadosIds = new Set(pares.map(p => p.idx));
-            const pendentes = lista.filter((_: AlteracaoPlanejada, i: number) => !atualizadosIds.has(i + 1));
-            const totalInicial = contexto.totalItensRevisao || lista.length;
-            const pendentesRestantes = pendentes.length;
-            const totalConcluido = totalInicial - pendentesRestantes;
-            
-            const feedbackMsg = `✅ *Progresso:* ${totalConcluido} de ${totalInicial} item(s) revisados.\n` + resultados.join('\n');
-
-            if (pendentes.length === 0) {
-                await sendTextMessage(from, feedbackMsg + '\n\n🎉 *Lote concluído com sucesso!* Verificando se ainda há itens pendentes...');
-                await delay(800);
-                // Cenário 15: Continuidade automática para grandes estoques
-                await processarRevisaoPrecos(from, loja);
-            } else {
-                let novaLista = `${feedbackMsg}\n\n📋 *Ainda pendentes:*\n`;
-                pendentes.forEach((item: AlteracaoPlanejada) => {
-                    const idxOriginal = lista.indexOf(item) + 1;
-                    const selo = calcularSeloFrescor(item.dataReferencia);
-                    novaLista += `*${idxOriginal}. ${item.nome}* — R$ ${item.precoFoto.toFixed(2).replace('.', ',')} / ${item.unidade} ${selo}\n`;
-                });
-                novaLista += `\n✏️ _Ex: *${pendentes.map((_: AlteracaoPlanejada, i: number) => `${lista.indexOf(pendentes[i]!) + 1} 0,00`).slice(0, 2).join(' ')}_`;
-                await salvarContexto(from, {
-                    ...contexto,
-                    alteracoesPlanejadas: pendentes,
-                    totalItensRevisao:   totalInicial,
-                });
-                await sendTextMessage(from, novaLista);
-            }
-            return;
-        }
-
-        // Se chegou aqui, isTextOnly é true, mas não encontrou pares válidos. (Cenários 5, 6, 7)
-        if (userText.trim().length > 0) {
-            const exemplo = lista.slice(0, 2).map((_: AlteracaoPlanejada, i: number) => `*${lista.indexOf(lista[i]!) + 1} 15,90*`).join('\n');
-            await sendTextMessage(from,
-                `🤔 Não consegui entender os valores. Lembre-se de colocar o **número do item** e depois o **preço**.\n\n` +
-                `Exemplo correto:\n${exemplo}\n\n` +
-                `🛑 _Digite 0 se quiser cancelar a revisão._`
-            );
-            return;
-        }
-
-        return; 
-    }
 
     // ══════════════════════════════════════════════════════════
     // CENÁRIO 1/8/12: Estado IDLE (Inicia Ingestão Proativa)
@@ -888,10 +754,6 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         return;
     }
 
-    // ── InventoryAgent: delega estados de inventário ──────────────────────────
-    if (await handleInventory(msg, from, loja, contexto, userMessageText, buttonId, isInteractive, isTextOnly, isMediaOnly, processMessage)) {
-        return;
-    }
 
 
     // ══════════════════════════════════════════════════════════
