@@ -118,12 +118,26 @@ export async function buscarSimilaresSemanticoRaw(lojaId: string, termoBusca: st
             p_limit:           15,
         });
 
-    if (error) {
-        logger.warn({ err: error.message }, '[SimilaresRaw] Erro no motor vetorial');
-        return [];
+    if (semanticos && semanticos.length > 0) {
+        // Enriquecimento: O RPC atual não retorna atualizado_em. Buscamos em lote para o selo de frescor.
+        const ids = semanticos.map((s: any) => s.id);
+        const { data: enrichment } = await supabase
+            .from('catalogo_ativo')
+            .select('id, atualizado_em')
+            .in('id', ids);
+
+        const mapaDatas = new Map(enrichment?.map(e => [e.id, e.atualizado_em]) || []);
+
+        return semanticos.map((s: any) => ({
+            id:           s.id,
+            produto_nome: s.produto_nome,
+            preco:        s.preco,
+            unidade:      s.unidade,
+            atualizado_em: mapaDatas.get(s.id) || null,
+        }));
     }
 
-    return semanticos || [];
+    return [];
 }
 
 /**
