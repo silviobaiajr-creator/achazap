@@ -49,6 +49,7 @@ import { processarMidia, processLoteProdutos, formatarCartaoProduto } from './sk
 import { handleOnboarding } from './agents/onboarding-agent.js';
 import { handleInventory, processarDadosProduto, avançarParaSimilaresOuSalvar } from './agents/inventory-agent.js';
 import { handleRevisor } from './agents/revisor-agent.js';
+import { gerarRelatorioTokens } from './skills/token-report.js';
 // ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -275,6 +276,18 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             const origemMute = buttonId.replace('admin_mute_', '');
             cache.set(`admin_mute_${origemMute}`, true, 60 * 60 * 1000); // 1h
             await sendTextMessage(from, `🔇 Alertas de erro da origem *${origemMute}* silenciados por 1 hora.`);
+            return;
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // ADMIN COMMANDS (TEXT) — Sprint 15
+    // ══════════════════════════════════════════════════════════
+    if (from === process.env.ACHAZAP_OWNER_NUMBER && isTextOnly) {
+        const cmd = userText.toLowerCase().trim();
+        if (cmd === '/tokens' || cmd === '/relatorio') {
+            const report = await gerarRelatorioTokens();
+            await sendTextMessage(from, report);
             return;
         }
     }

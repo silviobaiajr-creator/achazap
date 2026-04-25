@@ -82,6 +82,33 @@ export async function handleOnboarding(
         EstadosFluxo.ONBOARDING_CONSUMIDOR_LOCALIZACAO,
     ]);
 
+    // ── Camada de Retenção (Sprint 15) ─────────────────────────────────────────
+    const exitWords = ['cancelar', 'parar', 'sair', 'stop', 'quitar'];
+    const textLower = userText.trim().toLowerCase();
+    
+    if (contexto && ESTADOS_ONBOARDING.has(contexto.estado) && exitWords.includes(textLower)) {
+        await sendInteractiveButtons(from,
+            '🚨 *Não vá embora ainda!* Estamos quase terminando o seu cadastro.\n\nCom a loja ativa, o AchaZap mostra seus preços para todo o bairro automaticamente. Queremos te ajudar a vender mais. 🚀\n\nPodemos continuar?',
+            [
+                { id: 'onboarding_continue', title: '✅ Sim, continuar' },
+                { id: 'onboarding_cancel',   title: '❌ Parar agora' },
+            ]
+        );
+        return true;
+    }
+
+    if (isInteractive && buttonId === 'onboarding_cancel') {
+        await sendTextMessage(from, 'Entendido. Se mudar de ideia, é só mandar um "Oi" que recomeçamos de onde parou. Até logo!');
+        await limparContexto(from);
+        return true;
+    }
+
+    if (isInteractive && buttonId === 'onboarding_continue') {
+        await sendTextMessage(from, 'Maravilha! Vamos retomar. O que eu te perguntei por último foi:');
+        // O reprocessamento natural vai repetir a última pergunta baseada no estado salvo
+        return true;
+    }
+
     // Se não há contexto de onboarding ativo: inicia boas-vindas
     if (!contexto || (!ESTADOS_ONBOARDING.has(contexto.estado) && contexto.estado !== EstadosFluxo.CONSUMIDOR_IDLE)) {
         logger.info({ from }, '[OnboardingAgent] Novo número. Iniciando dispatcher.');

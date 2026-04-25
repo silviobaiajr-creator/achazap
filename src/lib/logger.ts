@@ -57,6 +57,8 @@ export function logTokens(
     }
 ) {
     if (!usageMetadata) return;
+    const tokensMsg = `[Gemini] ${operacao} — ${usageMetadata.totalTokenCount ?? '?'} tokens`;
+    
     logger.info({
         tipo: 'gemini_tokens',
         operacao,
@@ -65,5 +67,20 @@ export function logTokens(
         tokens_entrada: usageMetadata.promptTokenCount ?? 0,
         tokens_saida:   usageMetadata.candidatesTokenCount ?? 0,
         tokens_total:   usageMetadata.totalTokenCount ?? 0,
-    }, `[Gemini] ${operacao} — ${usageMetadata.totalTokenCount ?? '?'} tokens`);
+    }, tokensMsg);
+
+    // Sprint 15: Envia também para a Auditoria (Supabase) para controle de custos centralizado
+    enviarLogAuditoria({
+        whatsapp: from,
+        nivel: 'info',
+        contexto: 'GEMINI_COST',
+        mensagem: tokensMsg,
+        dados: {
+            operacao,
+            loja_id: lojaId,
+            tokens_entrada: usageMetadata.promptTokenCount ?? 0,
+            tokens_saida:   usageMetadata.candidatesTokenCount ?? 0,
+            tokens_total:   usageMetadata.totalTokenCount ?? 0,
+        }
+    });
 }
