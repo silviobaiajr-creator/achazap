@@ -153,7 +153,7 @@ export async function buscarSimilaresSemanticoRaw(lojaId: string, termoBusca: st
 export async function buscarProdutosSimilares(
     lojaId: string,
     termoBusca: string
-): Promise<Array<{ id: string; produto_nome: string; preco: number; unidade: string }>> {
+): Promise<Array<{ id: string; produto_nome: string; preco: number; unidade: string; atualizado_em?: string | null }>> {
 
     let candidatos = await buscarSimilaresSemanticoRaw(lojaId, termoBusca);
 
@@ -196,7 +196,16 @@ Retorne APENAS um array JSON com os índices (ex: [1, 2]), ou [] se nada for min
         const indices = parseSafe(IndicesSimilaresSchema, result.text || '[]', []);
         const filtrados = indices
             .filter((idx: number) => idx >= 1 && idx <= candidatos.length)
-            .map((idx: number) => candidatos[idx - 1]);
+            .map((idx: number) => {
+                const c = candidatos[idx - 1];
+                return {
+                    id:           c.id,
+                    produto_nome: c.produto_nome,
+                    preco:        c.preco,
+                    unidade:      c.unidade,
+                    atualizado_em: (c as any).atualizado_em ?? null,
+                };
+            });
 
         return filtrados;
     } catch (e) {
