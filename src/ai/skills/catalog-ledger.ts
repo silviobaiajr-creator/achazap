@@ -167,12 +167,13 @@ export async function buscarProdutosSimilares(
             model: GEMINI_MODEL,
             contents: `Você é um especialista em catálogos de supermercado.
 O lojista quer cadastrar/atualizar o produto: "${termoBusca}".
-Dos itens abaixo do ESTOQUE DA LOJA, quais são o MESMO produto?
+Identifique no estoque abaixo quais itens são o MESMO produto ou variações muito próximas que o lojista provavelmente deseja atualizar (Ex: se ele buscou "Leite", "Leite Integral" e "Leite em Pó" são candidatos válidos).
+
 Estoque:
 ${catalogList}
 
-Retorne APENAS um array JSON com os índices dos itens correspondentes (começando em 1), ou [].`,
-            config: { responseMimeType: 'application/json' },
+Retorne APENAS um array JSON com os índices dos itens correspondentes (ex: [1, 2]), ou [] se nada for minimamente parecido.`,
+            config: { responseMimeType: 'application/json', temperature: 0.0 },
         });
         logTokens('buscar_similares_reranking_gemini', lojaId, lojaId, result.usageMetadata);
 
@@ -258,7 +259,8 @@ export async function ingeriCatalogo(lojaId: string, produto: DadosProduto, font
                 marca:          camadas.marca,
                 especificacao:  camadas.especificacao,
                 unidade_medida: camadas.unidade_medida,
-                metadados:      camadas.metadados,
+                metadados:      camadas.metadados || {},
+                produto_sku:    `${lojaId}-${nomeSeguro.toLowerCase().replace(/\s+/g, '-')}`.substring(0, 100),
                 ...(vetorInfo ? { embedding: vetorInfo } : {})
             },
             { onConflict: 'loja_id,produto_nome', ignoreDuplicates: false }

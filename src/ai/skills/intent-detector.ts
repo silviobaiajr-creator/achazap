@@ -101,13 +101,12 @@ export async function batchRefinarCandidatosBusca(lote: Array<{termo: string, ca
     try {
         const result = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: `Você é um analista de estoque de supermercado. Recebeu uma lista de buscas e candidatos do banco de dados.
-Sua missão: Para cada "id_lote", identifique quais candidatos são EXATAMENTE o mesmo produto buscado.
-
+            contents: `Você é um analista de estoque. Para cada "id_lote", identifique quais candidatos são o MESMO produto ou variações que o lojista provavelmente quer atualizar.
+            
 Regras:
-1. Rejeite categorias cruzadas (Ex: Busca "Pão" -> Rejeite "Pão de Queijo").
-2. Rejeite se for apenas ingrediente (Ex: Busca "Tapioca" -> Rejeite "Biscoito de Tapioca").
-3. Se houver dúvidas, prefira NÃO validar o ID.
+1. Seja inclusivo: se a busca for genérica (ex: "Leite"), aceite variações (ex: "Leite Integral", "Leite em Pó").
+2. Rejeite apenas erros grosseiros (Ex: Busca "Leite" -> Rejeite "Biscoito de Leite" ou "Doce de Leite").
+3. Mantenha o foco no produto principal.
 
 Retorne EXCLUSIVAMENTE um JSON:
 {"resultados": [{"id_lote": 0, "ids_validos": ["uuid..."]}, {"id_lote": 1, "ids_validos": []}]}

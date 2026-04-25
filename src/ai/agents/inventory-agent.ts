@@ -573,10 +573,11 @@ export async function handleInventory(
             const listaAtualizados: string[] = [];
 
             for (const alt of alteracoes) {
-                if (alt.acao === 'remover') continue; // Pula itens excluídos pelo lojista
+                if (alt.acao === 'remover') continue; 
+                const fonteReal = alt.fonte || 'manual';
 
                 if (alt.acao === 'novo_cadastro') {
-                    await ingeriCatalogo(loja.id, { nome: alt.nome, preco: alt.precoFoto, unidade: alt.unidade }, 'foto');
+                    await ingeriCatalogo(loja.id, { nome: alt.nome, preco: alt.precoFoto, unidade: alt.unidade }, fonteReal);
                     inseridos++;
                 } else if (alt.acao === 'preco_atualizado' && alt.produtoExistente) {
                     await atualizarPrecoLedger(loja.id, alt.produtoExistente.produto_nome, alt.precoFoto, alt.unidade || alt.produtoExistente.unidade);
