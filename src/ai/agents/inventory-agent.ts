@@ -9,7 +9,8 @@ import { ai, GEMINI_MODEL } from '../../lib/gemini.js';
 import { logger, logTokens } from '../../lib/logger.js';
 import { parseSafe, NLPEscolhaSchema, ProdutoExtraidoSchema, MultiProdutosTextoSchema } from '../schemas.js';
 import { EstadosFluxo, type ContextoSessao, type DadosProduto, type AlteracaoPlanejada } from '../types.js';
-import { buscarProdutosSimilares, ingeriCatalogo, atualizarPrecoLedger, retirarEstoqueLedger } from '../skills/catalog-ledger.js';
+import { buscarProdutosSimilares, buscarSimilaresSemanticoRaw, ingeriCatalogo, atualizarPrecoLedger, retirarEstoqueLedger } from '../skills/catalog-ledger.js';
+import { rotearIntencaoGlobal, batchRefinarCandidatosBusca } from '../skills/intent-detector.js';
 import { processarMidia, processLoteProdutos, formatarCartaoProduto } from '../skills/vision-processor.js';
 import { enviarMenu, executarFuga } from '../shared.js';
 

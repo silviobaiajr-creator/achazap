@@ -14,7 +14,8 @@ import { ai, GEMINI_MODEL } from '../../lib/gemini.js';
 import { logger, logTokens } from '../../lib/logger.js';
 import { MultimodalExtraidoSchema, parseSafe } from '../schemas.js';
 import { EstadosFluxo, DadosProduto, AlteracaoPlanejada, ContextoSessao } from '../types.js';
-import { buscarProdutosSimilares } from './catalog-ledger.js';
+import { buscarProdutosSimilares, buscarSimilaresSemanticoRaw } from './catalog-ledger.js';
+import { batchRefinarCandidatosBusca } from './intent-detector.js';
 import { calcularSeloFrescor } from './revisor.js';
 import { createHash } from 'crypto';
 
@@ -177,13 +178,24 @@ JSON:`;
 
             await sendTextMessage(from, `⏳ Verificando *${itensValidos.length}* produto(s) no estoque...`);
 
-            const alteracoes: AlteracaoPlanejada[] = [];
+            // ── Etapa 1: Coleta de Candidatos Brutos (Sem Reranking) ──
+            const loteParaReranking: Array<{termo: string, candidatos: any[]}> = [];
+            for (const item of itensValidos) {
+                const candidatosBrutos = await buscarSimilaresSemanticoRaw(loja.id, item.nome);
+                loteParaReranking.push({ termo: item.nome, candidatos: candidatosBrutos });
+            }
 
+            // ── Etapa 2: Reranking em LOTE (Uma única chamada Gemini) ──
+            const mapaResultados = await batchRefinarCandidatosBusca(loteParaReranking);
+
+            const alteracoes: AlteracaoPlanejada[] = [];
             for (let i = 0; i < itensValidos.length; i++) {
                 const item = itensValidos[i];
-                if (!item.nome || item.preco <= 0) continue;
+                const candidatosBrutos = loteParaReranking[i].candidatos;
+                const idsValidos = mapaResultados.get(item.nome) || [];
+                
+                const similares = candidatosBrutos.filter(c => idsValidos.includes(c.id));
 
-                const similares = await buscarProdutosSimilares(loja.id, item.nome);
                 const alteracao: AlteracaoPlanejada = {
                     nome:      item.nome,
                     precoFoto: item.preco,
@@ -205,7 +217,6 @@ JSON:`;
                             unidade:      maisProximo.unidade,
                             atualizado_em: (maisProximo as any).atualizado_em ?? undefined,
                         };
-                        // Herança inteligente: adota a unidade do catálogo se a extração foi genérica
                         if (alteracao.unidade === 'un' && maisProximo.unidade && maisProximo.unidade !== 'un') {
                             alteracao.unidade = maisProximo.unidade;
                         }

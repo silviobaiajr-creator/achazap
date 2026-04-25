@@ -11,43 +11,125 @@ import { z } from 'zod';
 import { logger } from '../../lib/logger.js';
 
 /**
+ * Roteador Global de Intenção (IDLE).
+ * Consolida a detecção de Fuga (cancelar) e Cadastro Proativo em uma única chamada de IA.
+ * Reduz custos em 50% no estado IDLE.
+ */
+export async function rotearIntencaoGlobal(texto: string): Promise<{ ehFuga: boolean, ehCadastro: boolean }> {
+    const textoLower = texto.toLowerCase().trim();
+
+    // Regex rápido: Comandos diretos não precisam de IA
+    const PALAVRAS_FUGA_REGEX = /^(menu|sair|cancelar|parar|tchau|vaza|cancela|xau|limpar)$/i;
+    if (PALAVRAS_FUGA_REGEX.test(textoLower)) {
+        return { ehFuga: true, ehCadastro: false };
+    }
+
+    // Comandos de sistema
+    if (textoLower.startsWith('/') || textoLower === '0' || textoLower === '1') {
+        return { ehFuga: false, ehCadastro: false }; // Deixa o roteador de comandos tratar
+    }
+
+    try {
+        const result = await ai.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: `Você é um roteador de intenções para um assistente de mercado. Analise a frase e classifique:
+1. FUGA: O usuário quer cancelar, sair, voltar ao menu ou encerrar a operação atual.
+2. CADASTRO: O usuário está enviando o nome de um produto, preço ou intenção clara de adicionar algo ao estoque (Ex: "Arroz 10", "Lança aí: Leite").
+3. CONVERSA: Saudações ou perguntas genéricas (Ex: "Oi", "Como funciona?").
+
+Retorne APENAS o JSON: {"fuga": boolean, "cadastro": boolean}
+
+Frase: "${texto}"
+
+JSON:`,
+            config: { responseMimeType: 'application/json' },
+        });
+        logTokens('rotear_intencao_global', 'system', 'system', result.usageMetadata);
+        const schema = z.object({ fuga: z.boolean(), cadastro: z.boolean() });
+        const dados = parseSafe(schema, result.text || '{}', { fuga: false, cadastro: false });
+        return { ehFuga: dados.fuga, ehCadastro: dados.cadastro };
+    } catch {
+        return { ehFuga: false, ehCadastro: false };
+    }
+}
+
+/**
  * Detecta se o texto indica intenção de sair/cancelar o fluxo atual.
- * Usa NLP para capturar frases coloquiais que o regex não pega.
+ * Usado como fallback ou em fluxos ativos.
  */
 export async function detectarFugaNLP(texto: string): Promise<boolean> {
     try {
         const result = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: `Analise se a seguinte frase indica uma intenção global de encerrar ou sair de um fluxo de cadastro de produtos num sistema de estoque. NÃO confunda com nomes de produto (ex: "Apaga" pode ser uma borracha). Retorne APENAS o JSON: {"intencao_fuga": boolean}\n\nFrase: "${texto}"\n\nJSON:`,
+            contents: `O usuário quer CANCELAR ou SAIR do fluxo atual? (Ignorar nomes de produtos). 
+            Retorne APENAS JSON: {"fuga": boolean}
+            Frase: "${texto}"`,
             config: { responseMimeType: 'application/json' },
         });
         logTokens('detectar_fuga_nlp', 'system', 'system', result.usageMetadata);
-        const dados = parseSafe(FugaNLPSchema, result.text || '{}', { intencao_fuga: false });
-        return dados.intencao_fuga === true;
+        const schema = z.object({ fuga: z.boolean() });
+        const dados = parseSafe(schema, result.text || '{}', { fuga: false });
+        return dados.fuga;
     } catch {
         return false;
     }
 }
 
 /**
- * Detecta se o texto em estado IDLE indica intenção de cadastrar um produto.
- * Evita desperdício de tokens para saudações e mensagens genéricas.
+ * @deprecated Use rotearIntencaoGlobal no estado IDLE.
  */
 export async function detectarIntencaoProativa(texto: string): Promise<boolean> {
+    const res = await rotearIntencaoGlobal(texto);
+    return res.ehCadastro;
+}
+
+/**
+ * Filtro de Qualidade em Lote: Refina múltiplos produtos e seus candidatos em uma ÚNICA chamada.
+ * Reduz custos em N vezes (onde N é o número de produtos no lote).
+ */
+export async function batchRefinarCandidatosBusca(lote: Array<{termo: string, candidatos: any[]}>): Promise<Map<string, string[]>> {
+    const mapaResultados = new Map<string, string[]>();
+    if (!lote || lote.length === 0) return mapaResultados;
+
+    // Filtra apenas o essencial para o prompt
+    const loteSlim = lote.map((item, idx) => ({
+        id_lote: idx,
+        busca: item.termo,
+        candidatos: item.candidatos.map(c => ({ id: c.id, nome: c.produto_nome, preco: c.preco_atual, un: c.unidade }))
+    }));
+
     try {
         const result = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: `Analise se o usuário está tentando cadastrar um produto no estoque ou apenas conversando/dando oi. 
-            Se a mensagem for simplesmente o NOME de um produto (ex: "Acem", "Arroz", "Cerveja") ou contiver preço (ex: "Lança aí: Leite 4.50"), é cadastro.
-            Se for saudação ou pergunta genérica (ex: "Oi", "Como funciona?"), não é cadastro.
-            Retorne APENAS o JSON: {"intencao_cadastro": boolean}\n\nFrase: "${texto}"\n\nJSON:`,
-            config: { responseMimeType: 'application/json' },
+            contents: `Você é um analista de estoque de supermercado. Recebeu uma lista de buscas e candidatos do banco de dados.
+Sua missão: Para cada "id_lote", identifique quais candidatos são EXATAMENTE o mesmo produto buscado.
+
+Regras:
+1. Rejeite categorias cruzadas (Ex: Busca "Pão" -> Rejeite "Pão de Queijo").
+2. Rejeite se for apenas ingrediente (Ex: Busca "Tapioca" -> Rejeite "Biscoito de Tapioca").
+3. Se houver dúvidas, prefira NÃO validar o ID.
+
+Retorne EXCLUSIVAMENTE um JSON:
+{"resultados": [{"id_lote": 0, "ids_validos": ["uuid..."]}, {"id_lote": 1, "ids_validos": []}]}
+
+LOTE:
+${JSON.stringify(loteSlim)}`,
+            config: { responseMimeType: 'application/json', temperature: 0.0 },
         });
-        logTokens('detectar_intencao_proativa', 'system', 'system', result.usageMetadata);
-        const dados = parseSafe(z.object({ intencao_cadastro: z.boolean() }), result.text || '{}', { intencao_cadastro: false });
-        return dados.intencao_cadastro === true;
-    } catch {
-        return false;
+
+        logTokens('batch_refinar_candidatos', 'system', 'system', result.usageMetadata);
+        const schema = z.object({ resultados: z.array(z.object({ id_lote: z.number(), ids_validos: z.array(z.string()) })) });
+        const dados = parseSafe(schema, result.text || '{}', { resultados: [] });
+
+        dados.resultados.forEach(res => {
+            const termoOriginal = lote[res.id_lote]?.termo;
+            if (termoOriginal) mapaResultados.set(termoOriginal, res.ids_validos);
+        });
+
+        return mapaResultados;
+    } catch (e) {
+        logger.error({ e }, '[Batch Reranking] Erro na chamada Gemini');
+        return mapaResultados;
     }
 }
 

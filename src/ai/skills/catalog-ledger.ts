@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Skill: catalog-ledger
  * Responsabilidade: Todas as operações de leitura e escrita no catálogo de produtos.
  * Inclui busca de similares (pgvector semântico), inserção (UPSERT) com 6 camadas
@@ -102,6 +102,38 @@ Retorne APENAS um JSON com esses 5 campos:
  *   3. Fallback: full-scan + filtro Gemini se embedding falhar
  *
  * O Gemini é o árbitro final: mesmo que o pgvector retorne algo,
+ * ele confirma se /**
+ * Busca candidatos brutos via pgvector sem reranking.
+ * Útil para processamento em lote onde o reranking será feito consolidado.
+ */
+export async function buscarSimilaresSemanticoRaw(lojaId: string, termoBusca: string): Promise<any[]> {
+    const vetor = await gerarEmbedding(termoBusca);
+    if (!vetor) return [];
+
+    const { data: semanticos, error } = await supabase
+        .rpc('buscar_similares_semantico', {
+            p_loja_id:         lojaId,
+            p_query_embedding: vetor,
+            p_match_threshold: 0.55,
+            p_limit:           15,
+        });
+
+    if (error) {
+        logger.warn({ err: error.message }, '[SimilaresRaw] Erro no motor vetorial');
+        return [];
+    }
+
+    return semanticos || [];
+}
+
+/**
+ * Busca produtos similares dentro do estoque de uma loja.
+ * Fluxo:
+ *   1. Gera embedding → consulta pgvector (candidatos brutos)
+ *   2. SEMPRE filtra os candidatos via Gemini (reranking) — descarta falsos positivos
+ *   3. Fallback: full-scan + filtro Gemini se embedding falhar
+ *
+ * O Gemini é o árbitro final: mesmo que o pgvector retorne algo,
  * ele confirma se o item é realmente o mesmo produto buscado.
  */
 export async function buscarProdutosSimilares(
@@ -109,26 +141,7 @@ export async function buscarProdutosSimilares(
     termoBusca: string
 ): Promise<Array<{ id: string; produto_nome: string; preco: number; unidade: string }>> {
 
-    let candidatos: Array<{ id: string; produto_nome: string; preco: number; unidade: string }> = [];
-
-    // ── Etapa 1: Busca vetorial (candidatos brutos) ──
-    const vetor = await gerarEmbedding(termoBusca);
-    if (vetor) {
-        const { data: semanticos, error } = await supabase
-            .rpc('buscar_similares_semantico', {
-                p_loja_id:         lojaId,
-                p_query_embedding: vetor,
-                p_match_threshold: 0.55, // Threshold menor — Gemini filtra o ruído restante
-                p_limit:           15,
-            });
-
-        if (!error && semanticos && semanticos.length > 0) {
-            logger.info({ lojaId, termoBusca, total: semanticos.length }, '[Similares] Candidatos vetoriais encontrados, enviando para reranking');
-            candidatos = semanticos;
-        } else if (error) {
-            logger.warn({ err: error.message }, '[Similares] Erro no motor vetorial, tentando full-scan');
-        }
-    }
+    let candidatos = await buscarSimilaresSemanticoRaw(lojaId, termoBusca);
 
     // ── Fallback: full-scan se embedding falhou ou não retornou nada ──
     if (candidatos.length === 0) {
@@ -145,7 +158,6 @@ export async function buscarProdutosSimilares(
 
     // ── Etapa 2: Reranking OBRIGATÓRIO via Gemini ──
     // O Gemini valida cada candidato: se não é o mesmo produto, descarta.
-    // Isso evita que falsos positivos do pgvector apareçam para o lojista.
     const catalogList = candidatos
         .map((p, i) => `${i + 1}. ${p.produto_nome} (R$ ${p.preco} / ${p.unidade})`)
         .join('\n');
@@ -155,15 +167,9 @@ export async function buscarProdutosSimilares(
             model: GEMINI_MODEL,
             contents: `Você é um especialista em catálogos de supermercado.
 O lojista quer cadastrar/atualizar o produto: "${termoBusca}".
-
-Dos itens abaixo do ESTOQUE DA LOJA, quais são o MESMO produto (ou variações diretas dele)?
+Dos itens abaixo do ESTOQUE DA LOJA, quais são o MESMO produto?
 Estoque:
 ${catalogList}
-
-Regras de decisão:
-- Considere MESMO produto: mesmo item com marca ou embalagem diferente. Ex: "Feijão" encontra "Feijão Carioca 1kg", "Feijão Preto Kicaldo".
-- DESCARTE categorias completamente diferentes. Ex: "Feijão" NÃO é "Arroz", "Macarrão" ou "Leite".
-- Se nenhum for o mesmo produto, retorne [].
 
 Retorne APENAS um array JSON com os índices dos itens correspondentes (começando em 1), ou [].`,
             config: { responseMimeType: 'application/json' },
@@ -175,11 +181,13 @@ Retorne APENAS um array JSON com os índices dos itens correspondentes (começan
             .filter((idx: number) => idx >= 1 && idx <= candidatos.length)
             .map((idx: number) => candidatos[idx - 1]);
 
-        logger.info({ lojaId, termoBusca, candidatos: candidatos.length, aprovados: filtrados.length }, '[Similares] Reranking Gemini concluído');
         return filtrados;
     } catch (e) {
-        // Segurança: se o Gemini falhar, retorna vazio para não mostrar dados incorretos
         logger.error({ e }, '[Similares] Erro no reranking Gemini — retornando vazio por segurança');
+        return [];
+    }
+}
+imilares] Erro no reranking Gemini — retornando vazio por segurança');
         return [];
     }
 }
@@ -217,12 +225,26 @@ export async function ingeriCatalogo(lojaId: string, produto: DadosProduto, font
         return { inserido: false };
     }
 
-    // Enriquecimento em paralelo: embedding + decomposição 6 camadas
-    const textoParaVetor = `${nomeSeguro} ${unidadeSegura}`.trim();
-    const [vetorInfo, camadas] = await Promise.all([
-        gerarEmbedding(textoParaVetor),
-        decomporProduto(nomeSeguro),
-    ]);
+    // Enriquecimento inteligente: só consome Gemini se o produto for REALMENTE novo ou mudou de nome
+    let vetorInfo = (ativo as any)?.embedding ?? null;
+    let camadas: Camadas6 = {
+        membro_core:    (ativo as any)?.membro_core    ?? null,
+        marca:          (ativo as any)?.marca          ?? null,
+        especificacao:  (ativo as any)?.especificacao  ?? null,
+        unidade_medida: (ativo as any)?.unidade_medida ?? null,
+        metadados:      (ativo as any)?.metadados      ?? null,
+    };
+
+    if (!ativo || !camadas.membro_core) {
+        // Produto novo ou sem camadas: faz o enriquecimento completo
+        const textoParaVetor = `${nomeSeguro} ${unidadeSegura}`.trim();
+        const [v, c] = await Promise.all([
+            gerarEmbedding(textoParaVetor),
+            decomporProduto(nomeSeguro),
+        ]);
+        vetorInfo = v;
+        camadas = c;
+    }
 
     const { data: upserted, error: upsertError } = await supabase
         .from('catalogo_ativo')

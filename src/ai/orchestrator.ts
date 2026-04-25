@@ -43,7 +43,7 @@ import { ai, GEMINI_MODEL } from '../lib/gemini.js';
 // ── Skills importadas (Fase 1 de Modularização) ──────────────────────────────
 import { buscarProdutosSimilares, ingeriCatalogo, atualizarPrecoLedger, retirarEstoqueLedger, gerarEmbedding } from './skills/catalog-ledger.js';
 import { obterEstatisticas, criarOferta, buscarOfertasAtivas } from './skills/store-services.js';
-import { detectarFugaNLP, detectarIntencaoProativa, refinarCandidatosBusca, extrairListaCompras } from './skills/intent-detector.js';
+import { detectarFugaNLP, detectarIntencaoProativa, refinarCandidatosBusca, extrairListaCompras, rotearIntencaoGlobal } from './skills/intent-detector.js';
 import { processarRevisaoPrecos, calcularSeloFrescor } from './skills/revisor.js';
 import { processarMidia, processLoteProdutos, formatarCartaoProduto } from './skills/vision-processor.js';
 import { handleOnboarding } from './agents/onboarding-agent.js';
@@ -848,7 +848,14 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 return;
             }
 
-            const ehCadastro = await detectarIntencaoProativa(userMessageText);
+            const { ehFuga, ehCadastro } = await rotearIntencaoGlobal(userMessageText);
+
+            if (ehFuga) {
+                logger.info({ from, text: userMessageText }, '[Proativo] Fuga detectada em IDLE via NLP.');
+                await executarFuga(from, loja);
+                return;
+            }
+
             if (ehCadastro) {
                 logger.info({ from, text: userMessageText }, '[Proativo] Texto de cadastro detectado em IDLE.');
                 // Forçamos o processamento como se estivesse no estado de cadastro
@@ -856,7 +863,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 return;
             }
 
-            // Fallback: Se não for cadastro, envia o Menu Principal
+            // Fallback: Se não for cadastro nem fuga, envia o Menu Principal
             await enviarMenu(loja.nome, from);
             return;
         }
