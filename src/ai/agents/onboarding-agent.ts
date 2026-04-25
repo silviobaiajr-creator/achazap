@@ -52,6 +52,9 @@ export async function handleOnboarding(
     contexto: ContextoSessao | null,
     userText: string,
     buttonId: string,
+    isInteractive: boolean,
+    isTextOnly: boolean,
+    isMediaOnly: boolean,
     setLoja: (l: any) => void
 ): Promise<boolean> {
 

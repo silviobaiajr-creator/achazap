@@ -307,7 +307,7 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         // ══════════════════════════════════════════════════════════
         // DISPATCHER DE PERSONA (Onboarding) - Sprint Auditoria
         // ══════════════════════════════════════════════════════════
-        const foiConsumido = await handleOnboarding(msg, from, loja, contexto, userText, buttonId, (novaLoja) => {
+        const foiConsumido = await handleOnboarding(msg, from, loja, contexto, userText, buttonId, isInteractive, isTextOnly, isMediaOnly, (novaLoja) => {
             loja = novaLoja;
         });
 

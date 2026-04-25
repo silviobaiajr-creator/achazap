@@ -65,68 +65,68 @@ describe('Smoke Test — Agentes da Fase 2', () => {
     });
 
     it('Scenario 1: InventoryAgent deve ignorar se estado for IDLE', async () => {
-        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: 'Oi' } } as any, FROM, LOJA, { estado: EstadosFluxo.IDLE }, 'Oi', '', mockReprocess);
+        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: 'Oi' } } as any, FROM, LOJA, { estado: EstadosFluxo.IDLE }, 'Oi', '', false, true, false, mockReprocess);
         expect(consumed).toBe(false);
     });
 
     it('Scenario 2: InventoryAgent deve consumir se estado for AGUARDANDO_DADOS_PRODUTO', async () => {
-        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: 'Arroz 10' } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO }, 'Arroz 10', '', mockReprocess);
+        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: 'Arroz 10' } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_DADOS_PRODUTO }, 'Arroz 10', '', false, true, false, mockReprocess);
         expect(consumed).toBe(true);
     });
 
     it('Scenario 3: InventoryAgent deve consumir se estado for AGUARDANDO_ACAO_SIMILARES', async () => {
-        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: '1' } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_ACAO_SIMILARES, similaresEncontrados: [{}] }, '1', '', mockReprocess);
+        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: '1' } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_ACAO_SIMILARES, similaresEncontrados: [{}] }, '1', '', false, true, false, mockReprocess);
         expect(consumed).toBe(true);
     });
 
     it('Scenario 4: InventoryAgent deve consumir se estado for AGUARDANDO_ACAO_PRODUTO_SELECIONADO', async () => {
-        const consumed = await handleInventory({ from: FROM, type: 'interactive', interactive: { button_reply: { id: 'acao_atualizar' } } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_ACAO_PRODUTO_SELECIONADO, dadosProduto: { nome: 'X' } }, '', 'acao_atualizar', mockReprocess);
+        const consumed = await handleInventory({ from: FROM, type: 'interactive', interactive: { button_reply: { id: 'acao_atualizar' } } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_ACAO_PRODUTO_SELECIONADO, dadosProduto: { nome: 'X' } }, '', 'acao_atualizar', true, false, false, mockReprocess);
         expect(consumed).toBe(true);
     });
 
     it('Scenario 5: InventoryAgent deve consumir se estado for AGUARDANDO_CONFIRMACAO_ALTERACOES', async () => {
-        const consumed = await handleInventory({ from: FROM, type: 'interactive', interactive: { button_reply: { id: 'confirmar_alteracoes_sim' } } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES }, '', 'confirmar_alteracoes_sim', mockReprocess);
+        const consumed = await handleInventory({ from: FROM, type: 'interactive', interactive: { button_reply: { id: 'confirmar_alteracoes_sim' } } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_CONFIRMACAO_ALTERACOES }, '', 'confirmar_alteracoes_sim', true, false, false, mockReprocess);
         expect(consumed).toBe(true);
     });
 
     it('Scenario 6: InventoryAgent deve consumir se estado for AGUARDANDO_SELECAO_EDICAO', async () => {
         // Enviar '1' para o item de índice 0 (pois '1' é o label visual)
-        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: '1' } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_SELECAO_EDICAO, alteracoesPlanejadas: [{ nome: 'Item 1', precoFoto: 10.0 }] }, '1', '', mockReprocess);
+        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: '1' } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_SELECAO_EDICAO, alteracoesPlanejadas: [{ nome: 'Item 1', precoFoto: 10.0, unidade: 'un', acao: 'novo_cadastro' }] }, '1', '', false, true, false, mockReprocess);
         expect(consumed).toBe(true);
     });
 
     it('Scenario 7: OnboardingAgent deve consumir se não houver loja nem contexto', async () => {
-        const consumed = await handleOnboarding({ from: FROM, type: 'text', text: { body: 'Oi' } } as any, FROM, null, null, 'Oi', '', (l) => {});
+        const consumed = await handleOnboarding({ from: FROM, type: 'text', text: { body: 'Oi' } } as any, FROM, null, null, 'Oi', '', false, true, false, (l) => {});
         expect(consumed).toBe(true);
         expect(sentMessages[0]).toContain('AchaZap');
     });
 
     it('Scenario 8: OnboardingAgent deve ignorar se a loja já existir', async () => {
-        const consumed = await handleOnboarding({ from: FROM, type: 'text', text: { body: 'Oi' } } as any, FROM, LOJA, { estado: EstadosFluxo.IDLE }, 'Oi', '', (l) => {});
+        const consumed = await handleOnboarding({ from: FROM, type: 'text', text: { body: 'Oi' } } as any, FROM, LOJA, { estado: EstadosFluxo.IDLE }, 'Oi', '', false, true, false, (l) => {});
         expect(consumed).toBe(false);
     });
 
     it('Scenario 9: OnboardingAgent deve consumir se estiver em ONBOARDING_NOME', async () => {
-        const consumed = await handleOnboarding({ from: FROM, type: 'text', text: { body: 'Minha Loja' } } as any, FROM, null, { estado: EstadosFluxo.ONBOARDING_NOME }, 'Minha Loja', '', (l) => {});
+        const consumed = await handleOnboarding({ from: FROM, type: 'text', text: { body: 'Minha Loja' } } as any, FROM, null, { estado: EstadosFluxo.ONBOARDING_NOME }, 'Minha Loja', '', false, true, false, (l) => {});
         expect(consumed).toBe(true);
     });
 
     it('Scenario 10: InventoryAgent deve falhar graciosamente se dadosProduto sumirem', async () => {
-        const consumed = await handleInventory({ from: FROM, type: 'interactive', interactive: { button_reply: { id: 'acao_atualizar' } } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_ACAO_PRODUTO_SELECIONADO, dadosProduto: null }, '', 'acao_atualizar', mockReprocess);
+        const consumed = await handleInventory({ from: FROM, type: 'interactive', interactive: { button_reply: { id: 'acao_atualizar' } } } as any, FROM, LOJA, { estado: EstadosFluxo.AGUARDANDO_ACAO_PRODUTO_SELECIONADO, dadosProduto: undefined }, '', 'acao_atualizar', true, false, false, mockReprocess);
         expect(consumed).toBe(true);
         expect(sentMessages[0]).toContain('Sessão expirada');
     });
 
     it('Scenario 11: InventoryAgent deve processar 0 (remover) no AGUARDANDO_NOVO_PRECO_EDICAO', async () => {
-        const ctx = { estado: EstadosFluxo.AGUARDANDO_NOVO_PRECO_EDICAO, acao: '0', alteracoesPlanejadas: [{ nome: 'X', precoFoto: 10 }] };
-        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: '0' } } as any, FROM, LOJA, ctx, '0', '', mockReprocess);
+        const ctx = { estado: EstadosFluxo.AGUARDANDO_NOVO_PRECO_EDICAO, acao: '0', alteracoesPlanejadas: [{ nome: 'X', precoFoto: 10, unidade: 'un', acao: 'novo_cadastro' }] as any };
+        const consumed = await handleInventory({ from: FROM, type: 'text', text: { body: '0' } } as any, FROM, LOJA, ctx, '0', '', false, true, false, mockReprocess);
         expect(consumed).toBe(true);
         expect(sentMessages[0]).toContain('removeu todos os itens');
     });
 
     it('Scenario 12: OnboardingAgent deve ignorar se for consumidor cadastrado', async () => {
         mockChainable.maybeSingle.mockResolvedValueOnce({ data: { id: 'user_123' }, error: null });
-        const consumed = await handleOnboarding({ from: FROM, type: 'text', text: { body: 'Oi' } } as any, FROM, null, null, 'Oi', '', (l) => {});
+        const consumed = await handleOnboarding({ from: FROM, type: 'text', text: { body: 'Oi' } } as any, FROM, null, null, 'Oi', '', false, true, false, (l) => {});
         expect(consumed).toBe(false);
     });
 });

@@ -85,4 +85,5 @@ export interface ContextoSessao {
     itensPendenteConfirmacao?: any[];
     alteracoesPlanejadas?: AlteracaoPlanejada[];
     totalItensRevisao?: number; // Contador para progresso da revisão
+    revisaoIndice?: number; // Índice atual no loop de revisão de preços
 }
