@@ -180,6 +180,7 @@ async function runAll() {
             false,
             true,
             false,
+            async () => {},
         );
         assert(result === false, `Esperava false, recebeu ${result}`);
     });
