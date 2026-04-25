@@ -104,7 +104,7 @@ export async function batchRefinarCandidatosBusca(lote: Array<{termo: string, ca
             contents: `Você é um analista de estoque. Para cada "id_lote", identifique quais candidatos são o MESMO produto ou variações que o lojista provavelmente quer atualizar.
             
 Regras:
-1. Seja inclusivo: se a busca for genérica (ex: "Leite"), aceite variações (ex: "Leite Integral", "Leite em Pó").
+1. Seja inclusivo: se a busca for genérica (ex: "Café"), você DEVE selecionar todos os cafés (ex: "Café Melitta", "Café Pilão").
 2. Rejeite apenas erros grosseiros (Ex: Busca "Leite" -> Rejeite "Biscoito de Leite" ou "Doce de Leite").
 3. Mantenha o foco no produto principal.
 

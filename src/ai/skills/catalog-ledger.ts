@@ -114,7 +114,7 @@ export async function buscarSimilaresSemanticoRaw(lojaId: string, termoBusca: st
         .rpc('buscar_similares_semantico', {
             p_loja_id:         lojaId,
             p_query_embedding: vetor,
-            p_match_threshold: 0.55,
+            p_match_threshold: 0.45,
             p_limit:           15,
         });
 
@@ -147,7 +147,7 @@ export async function buscarProdutosSimilares(
     if (candidatos.length === 0) {
         const { data, error: scanError } = await supabase
             .from('catalogo_ativo')
-            .select('id, produto_nome, preco, unidade')
+            .select('id, produto_nome, preco, unidade, atualizado_em')
             .eq('loja_id', lojaId)
             .eq('disponivel', true);
 
@@ -167,12 +167,14 @@ export async function buscarProdutosSimilares(
             model: GEMINI_MODEL,
             contents: `Você é um especialista em catálogos de supermercado.
 O lojista quer cadastrar/atualizar o produto: "${termoBusca}".
-Identifique no estoque abaixo quais itens são o MESMO produto ou variações muito próximas que o lojista provavelmente deseja atualizar (Ex: se ele buscou "Leite", "Leite Integral" e "Leite em Pó" são candidatos válidos).
+Identifique no estoque abaixo QUAIS itens podem ser o produto que ele quer (mesmo produto ou variações).
+
+Regra de Ouro: Se a busca for genérica (ex: "Café"), você DEVE selecionar todos os cafés da lista (ex: "Café Melitta", "Café Pilão"). Só descarte se for algo totalmente diferente como "Filtro de Café".
 
 Estoque:
 ${catalogList}
 
-Retorne APENAS um array JSON com os índices dos itens correspondentes (ex: [1, 2]), ou [] se nada for minimamente parecido.`,
+Retorne APENAS um array JSON com os índices (ex: [1, 2]), ou [] se nada for minimamente parecido.`,
             config: { responseMimeType: 'application/json', temperature: 0.0 },
         });
         logTokens('buscar_similares_reranking_gemini', lojaId, lojaId, result.usageMetadata);
