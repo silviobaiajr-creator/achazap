@@ -13,6 +13,7 @@ import { buscarProdutosSimilares, buscarSimilaresSemanticoRaw, ingeriCatalogo, a
 import { rotearIntencaoGlobal, batchRefinarCandidatosBusca } from '../skills/intent-detector.js';
 import { processarMidia, processLoteProdutos, formatarCartaoProduto } from '../skills/vision-processor.js';
 import { enviarMenu, executarFuga } from '../shared.js';
+import { calcularSeloFrescor } from '../skills/revisor.js';
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
@@ -395,7 +396,10 @@ async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: 
             botoes.push({ id: '0', title: '🔄 Cadastrar como Novo' });
 
             const textoSimples = similares
-                .map((s, i) => `*${i + 1}* - ${s.produto_nome} (R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade})`)
+                .map((s, i) => {
+                    const selo = calcularSeloFrescor((s as any).atualizado_em);
+                    return `*${i + 1}* - ${s.produto_nome} (R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade})\n⏱️ ${selo}`;
+                })
                 .join('\n');
 
             await sendTextMessage(from, `🔍 *Produtos parecidos no estoque:*\n\n${textoSimples}\n\nEste é o mesmo produto que você quer atualizar?`);
@@ -409,9 +413,11 @@ async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: 
             let listaMsg = '🔍 *Encontrei produtos parecidos no estoque*\nResponda com o número correspondente:\n\n';
             for (let i = 0; i < similares.length; i++) {
                 const s = similares[i];
+                const selo = calcularSeloFrescor((s as any).atualizado_em);
                 listaMsg += `───────────────\n`;
                 listaMsg += `*${i + 1}* - ${s.produto_nome}\n`;
-                listaMsg += `📦 Estoque: R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade}\n`;
+                listaMsg += `💰 R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade}\n`;
+                listaMsg += `⏱️ ${selo}\n`;
             }
             listaMsg += `───────────────\n`;
             listaMsg += `*0* - Nenhum (cadastrar como novo)`;
