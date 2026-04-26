@@ -942,6 +942,7 @@ export async function handleInventory(
                     produto_nome: similarEscolhido.produto_nome,
                     preco: similarEscolhido.preco,
                     unidade: similarEscolhido.unidade,
+                    atualizado_em: (similarEscolhido as any).atualizado_em ?? null,
                 };
                 item.similares = undefined; // limpa a lista
                 
