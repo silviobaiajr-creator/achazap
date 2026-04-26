@@ -49,14 +49,14 @@ export interface AlteracaoPlanejada {
         produto_nome: string;
         preco: number;
         unidade: string;
-        atualizado_em?: string;
+        atualizado_em?: string | null;
     };
     similares?: Array<{
         id: string;
         produto_nome: string;
         preco: number;
         unidade: string;
-        atualizado_em?: string;
+        atualizado_em?: string | null;
     }>;
 }
 
