@@ -761,7 +761,10 @@ export async function handleInventory(
                 botoes.push({ id: '0', title: '🔄 Cadastrar como Novo' });
 
                 const textoSimples = similares
-                    .map((s: any, i: number) => `*${i + 1}* - ${s.produto_nome} (R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade})`)
+                    .map((s: any, i: number) => {
+                        const selo = calcularSeloFrescor(s.atualizado_em);
+                        return `*${i + 1}* - ${s.produto_nome} (R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade})\n⏱️ ${selo}`;
+                    })
                     .join('\n');
 
                 await sendTextMessage(from, `🔍 *Qual destes é o ${itemEscolhido.nome}?*\n\n${textoSimples}`);
@@ -773,9 +776,11 @@ export async function handleInventory(
             } else {
                 let listaMsg = `⚠️ *Encontrei ${similares.length} opções no estoque*\nQual delas é o *${itemEscolhido.nome}*?\n\n`;
                 similares.forEach((s: any, idx: number) => {
+                    const selo = calcularSeloFrescor(s.atualizado_em);
                     listaMsg += `───────────────\n`;
                     listaMsg += `*${idx + 1}* - ${s.produto_nome}\n`;
-                    listaMsg += `📦 Estoque: R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade}\n`;
+                    listaMsg += `💰 R$ ${s.preco.toFixed(2).replace('.', ',')} / ${s.unidade}\n`;
+                    listaMsg += `⏱️ ${selo}\n`;
                 });
                 listaMsg += `───────────────\n*0* - Nenhum (cadastrar como novo)`;
 
