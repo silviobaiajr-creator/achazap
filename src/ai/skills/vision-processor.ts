@@ -59,10 +59,12 @@ export function formatarCartaoProduto(item: AlteracaoPlanejada, indice: number, 
         card += `Sem alteração (confirmado hoje)`;
     } else if (item.acao === 'ambiguo') {
         const numSimilares = item.similares?.length ?? '?';
-        // Lista os nomes dos similares encontrados para o lojista saber exatamente o que o sistema viu
         const nomesSimilares = item.similares
             ?.slice(0, 4)
-            .map(s => `• ${s.produto_nome} (R$ ${s.preco.toFixed(2).replace('.', ',')}/${s.unidade})`)
+            .map(s => {
+                const selo = calcularSeloFrescor(s.atualizado_em);
+                return `• ${s.produto_nome} (R$ ${s.preco.toFixed(2).replace('.', ',')}/${s.unidade}) ${selo}`;
+            })
             .join('\n') ?? '';
         card += `⚠️ ${num} *${item.nome}*\n`;
         card += `💰 ${rotuloFonte}: *${precoFoto}*\n`;
