@@ -6,7 +6,8 @@
 import pino from 'pino';
 import { enviarLogAuditoria } from './audit.js';
 
-export const logger = pino({
+// --- Configuração do Logger Principal ---
+const pinoLogger = pino({
     level: process.env.LOG_LEVEL ?? 'info',
     transport:
         process.env.NODE_ENV !== 'production'
@@ -15,36 +16,57 @@ export const logger = pino({
 });
 
 /**
- * Cria um logger filho com contexto fixo (from, estado).
- * Se o `from` for o número do Owner, instala um "Grampo de Auditoria":
- * cada linha de log é espelhada silenciosamente no Supabase (logs_dev).
+ * Universal Mirror (Sprint 15)
+ * Intercepta os métodos de log do Pino. Se houver um campo 'from' (número do WhatsApp),
+ * envia uma cópia para o Supabase (logs_dev).
  */
-export function criarLoggerConversa(from: string, estado?: string) {
-    const child = logger.child({ from, estado });
-    const ownerNumber = process.env.ACHAZAP_OWNER_NUMBER;
+function wrapLogger(baseLogger: any) {
+    const intercept = (method: string) => {
+        const original = baseLogger[method].bind(baseLogger);
+        return (dadosOuMsg: any, msg?: string) => {
+            // Executa o log original no console (Render)
+            original(dadosOuMsg, msg);
 
-    if (!ownerNumber || from !== ownerNumber) return child;
-
-    // --- Grampo de Auditoria (só ativo para o Owner) ---
-    const ctx = estado ?? 'DESCONHECIDO';
-    const intercept = (nivel: 'info' | 'warn' | 'error') =>
-        (dadosOuMsg: any, msg?: string) => {
+            // Tenta extrair o número do WhatsApp e o contexto
+            const dados = typeof dadosOuMsg === 'object' ? dadosOuMsg : {};
+            const from = dados.from || dados.whatsapp;
             const mensagem = typeof dadosOuMsg === 'string' ? dadosOuMsg : (msg ?? '');
-            const dados    = typeof dadosOuMsg === 'object' ? dadosOuMsg : undefined;
-            enviarLogAuditoria({ whatsapp: from, nivel, contexto: ctx, mensagem, dados });
-            return (child[nivel] as any)(dadosOuMsg, msg);
-        };
 
-    return Object.assign(Object.create(child), {
+            // Só espelha se tiver um número de WhatsApp e não for nível 'debug'
+            if (from && typeof from === 'string' && method !== 'debug') {
+                enviarLogAuditoria({
+                    whatsapp: from,
+                    nivel: method as any,
+                    contexto: dados.contexto || dados.estado || 'SISTEMA',
+                    mensagem: mensagem,
+                    dados: dados
+                });
+            }
+        };
+    };
+
+    const wrapped = {
+        ...baseLogger,
         info:  intercept('info'),
         warn:  intercept('warn'),
         error: intercept('error'),
-    });
+        debug: baseLogger.debug.bind(baseLogger), // Debug não espelha para poupar DB
+    };
+
+    // Ajusta o método child para retornar um logger também "wrappado"
+    wrapped.child = (bindings: any) => wrapLogger(baseLogger.child(bindings));
+    
+    return wrapped;
+}
+
+export const logger = wrapLogger(pinoLogger);
+
+export function criarLoggerConversa(from: string, estado?: string) {
+    return logger.child({ from, estado });
 }
 
 /**
  * Loga o uso de tokens de uma chamada ao Gemini (4.2 — controle de custo).
- * Persiste no console estruturado para análise posterior.
  */
 export function logTokens(
     operacao: string,
@@ -68,19 +90,6 @@ export function logTokens(
         tokens_saida:   usageMetadata.candidatesTokenCount ?? 0,
         tokens_total:   usageMetadata.totalTokenCount ?? 0,
     }, tokensMsg);
-
-    // Sprint 15: Envia também para a Auditoria (Supabase) para controle de custos centralizado
-    enviarLogAuditoria({
-        whatsapp: from,
-        nivel: 'info',
-        contexto: 'GEMINI_COST',
-        mensagem: tokensMsg,
-        dados: {
-            operacao,
-            loja_id: lojaId,
-            tokens_entrada: usageMetadata.promptTokenCount ?? 0,
-            tokens_saida:   usageMetadata.candidatesTokenCount ?? 0,
-            tokens_total:   usageMetadata.totalTokenCount ?? 0,
-        }
-    });
+    
+    // O envio para enviarLogAuditoria agora é automático via logger.info
 }
