@@ -119,7 +119,7 @@ export async function buscarSimilaresSemanticoRaw(lojaId: string, termoBusca: st
         });
 
     if (semanticos && semanticos.length > 0) {
-        // Enriquecimento: O RPC atual não retorna atualizado_em. Buscamos em lote para o selo de frescor.
+        // Enriquecimento: busca atualizado_em em lote (não está no RPC por performance)
         const ids = semanticos.map((s: any) => s.id);
         const { data: enrichment } = await supabase
             .from('catalogo_ativo')
@@ -133,6 +133,10 @@ export async function buscarSimilaresSemanticoRaw(lojaId: string, termoBusca: st
             produto_nome: s.produto_nome,
             preco:        s.preco,
             unidade:      s.unidade,
+            // Campos de decomposição — agora retornados diretamente pelo RPC 023
+            membro_core:   s.membro_core   ?? null,
+            marca:         s.marca         ?? null,
+            especificacao: s.especificacao ?? null,
             atualizado_em: mapaDatas.get(s.id) || null,
         }));
     }
@@ -171,9 +175,16 @@ export async function buscarProdutosSimilares(
     }
 
     // ── Etapa 2: Reranking OBRIGATÓRIO via Gemini ──
-    // O Gemini valida cada candidato: se não é o mesmo produto, descarta.
+    // O Gemini valida cada candidato com campos estruturados (marca, membro_core, especificacao)
+    // para garantir rejeição determinística de produtos de marcas ou tipos diferentes.
     const catalogList = candidatos
-        .map((p, i) => `${i + 1}. ${p.produto_nome} (R$ ${p.preco} / ${p.unidade})`)
+        .map((p: any, i: number) => {
+            const core  = p.membro_core   ? `core: ${p.membro_core}`     : '';
+            const marca = p.marca         ? `marca: ${p.marca}`          : '';
+            const espec = p.especificacao ? `tipo: ${p.especificacao}`   : '';
+            const attrs = [core, marca, espec].filter(Boolean).join(' | ');
+            return `${i + 1}. ${p.produto_nome} (R$ ${p.preco} / ${p.unidade})${attrs ? ` [${attrs}]` : ''}`;
+        })
         .join('\n');
 
     try {
@@ -181,14 +192,17 @@ export async function buscarProdutosSimilares(
             model: GEMINI_MODEL,
             contents: `Você é um especialista em catálogos de supermercado.
 O lojista quer cadastrar/atualizar o produto: "${termoBusca}".
-Identifique no estoque abaixo QUAIS itens podem ser o produto que ele quer (mesmo produto ou variações).
+Identifique no estoque abaixo QUAIS itens são EXATAMENTE o mesmo produto ou uma variação direta.
 
-Regra de Ouro: Se a busca for genérica (ex: "Café"), você DEVE selecionar todos os cafés da lista (ex: "Café Melitta", "Café Pilão"). Só descarte se for algo totalmente diferente como "Filtro de Café".
+REGRAS (em ordem de prioridade):
+1. MARCA: Se o termo buscado contém uma marca (ex: "Ninho", "Itambé", "Oregon"), SOMENTE aceite candidatos da MESMA marca. Marcas diferentes = produtos diferentes. REJEITE.
+2. ESPECIFICAÇÃO: Se o termo contém tipo ou preparo (ex: "Integral", "Recheado", "Vácuo"), REJEITE candidatos com tipo diferente.
+3. GENÉRICO: Se a busca for genérica sem marca (ex: apenas "Café"), selecione todos os cafés da lista. Só descarte se for algo totalmente diferente.
 
 Estoque:
 ${catalogList}
 
-Retorne APENAS um array JSON com os índices (ex: [1, 2]), ou [] se nada for minimamente parecido.`,
+Retorne APENAS um array JSON com os índices (ex: [1, 2]), ou [] se nenhum candidato atender às regras acima.`,
             config: { responseMimeType: 'application/json', temperature: 0.0 },
         });
         logTokens('buscar_similares_reranking_gemini', lojaId, lojaId, result.usageMetadata);

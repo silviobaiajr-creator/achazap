@@ -277,14 +277,19 @@ JSON:`;
 
                         linhasNovas.push({
                             row: [
-                                loja.id,
-                                nome.substring(0, 250),
-                                sku,
-                                preco,
-                                unidade.substring(0, 30),
-                                'csv',
-                            ],
-                            extra: { marca_planilha, categoria, estoque }
+                                loja.id,                    // $1 loja_id
+                                nome.substring(0, 250),     // $2 produto_nome
+                                sku,                        // $3 produto_sku
+                                preco,                      // $4 preco
+                                unidade.substring(0, 30),   // $5 unidade
+                                'csv',                      // $6 fonte_ingestao
+                                // Campos de decomposição direto do PDV (quando existem)
+                                null,                                                  // $7 membro_core — preenchido pelo embeddingWorker
+                                marca_planilha?.substring(0, 100) ?? null,             // $8 marca (direto do PDV)
+                                null,                                                  // $9 especificacao — preenchido pelo embeddingWorker
+                                mapa.coluna_unidade ? unidade.substring(0, 30) : null, // $10 unidade_medida (do PDV se mapeada)
+                                categoria ? JSON.stringify({ categoria_planilha: categoria, estoque_atual: estoque ?? undefined }) : null, // $11 metadados
+                            ]
                         });
 
                         if (isNovo) {
@@ -299,38 +304,19 @@ JSON:`;
                         }
                     }
 
-                    // Decompõe os novos produtos em 6 camadas em paralelo (antes de gravar)
-                    const linhasComCamadas = await Promise.all(
-                        linhasNovas.map(async (item: any) => {
-                            const { row, extra } = item;
-                            const camadas = await decomporProduto(row[1]); // row[1] = produto_nome
-                            
-                            // 💡 Inteligência Híbrida: Prioriza a Marca da planilha se detectada
-                            if (extra.marca_planilha) {
-                                camadas.marca = extra.marca_planilha.substring(0, 100);
-                            }
-                            
-                            // 📥 Preservação de Dados: Categoria e Estoque vão para Metadados (JSONB)
-                            const metadados = camadas.metadados || {};
-                            if (extra.categoria) metadados.categoria_planilha = extra.categoria;
-                            if (extra.estoque)   metadados.estoque_atual = extra.estoque;
-                            camadas.metadados = metadados;
-
-                            return { row, camadas };
-                        })
-                    );
-
-                    if (linhasComCamadas.length > 0) {
+                    // INSERT direto — sem chamada Gemini por linha.
+                    // Os campos de decomposição (membro_core, especificacao) que não vieram
+                    // do PDV ficam NULL e serão preenchidos pelo embeddingWorker em background.
+                    if (linhasNovas.length > 0) {
                         await client.query('BEGIN');
 
-                        // ── UPSERT em catalogo_ativo (snapshot por produto) ──────────────
-                        const ativoPlaceholders = linhasComCamadas.map((_, i) =>
+                        // ── UPSERT em catalogo_ativo ──────────────────────────────────────
+                        const ativoPlaceholders = linhasNovas.map((_, i) =>
                             `($${i*11+1},$${i*11+2},$${i*11+3},$${i*11+4},$${i*11+5},$${i*11+6},$${i*11+7},$${i*11+8},$${i*11+9},$${i*11+10},$${i*11+11})`
                         ).join(', ');
-                        const flatValues = linhasComCamadas.flatMap(({ row, camadas }) => [
-                            row[0], row[1], row[2], row[3], row[4], row[5], // loja_id, nome, sku, preco, unidade, fonte
-                            camadas.membro_core, camadas.marca, camadas.especificacao, camadas.unidade_medida,
-                            camadas.metadados ? JSON.stringify(camadas.metadados) : null,
+                        const flatValues = linhasNovas.flatMap((item: any) => [
+                            item.row[0], item.row[1], item.row[2], item.row[3], item.row[4], item.row[5],
+                            item.row[6], item.row[7], item.row[8], item.row[9], item.row[10],
                         ]);
                         const { rows: upsertedRows } = await client.query<{ id: string; produto_nome: string; produto_sku: string | null }>(
                             `INSERT INTO catalogo_ativo
@@ -338,30 +324,28 @@ JSON:`;
                                   membro_core, marca, especificacao, unidade_medida, metadados)
                              VALUES ${ativoPlaceholders}
                              ON CONFLICT (loja_id, produto_nome) DO UPDATE
-                                 SET preco = EXCLUDED.preco,
-                                     unidade = EXCLUDED.unidade,
-                                     disponivel = true,
+                                 SET preco          = EXCLUDED.preco,
+                                     unidade        = EXCLUDED.unidade,
+                                     disponivel     = true,
                                      fonte_ingestao = EXCLUDED.fonte_ingestao,
-                                     membro_core = EXCLUDED.membro_core,
-                                     marca = EXCLUDED.marca,
-                                     especificacao = EXCLUDED.especificacao,
-                                     unidade_medida = EXCLUDED.unidade_medida,
-                                     metadados = EXCLUDED.metadados,
-                                     atualizado_em = now()
+                                     -- COALESCE: só atualiza se o PDV trouxe o valor (não sobrescreve com NULL)
+                                     marca          = COALESCE(EXCLUDED.marca,          catalogo_ativo.marca),
+                                     unidade_medida = COALESCE(EXCLUDED.unidade_medida, catalogo_ativo.unidade_medida),
+                                     metadados      = COALESCE(EXCLUDED.metadados,      catalogo_ativo.metadados),
+                                     atualizado_em  = now()
                              RETURNING id, produto_nome, produto_sku`,
                             flatValues
                         );
 
-                        // ── INSERT de auditoria em catalogo_historico ───────────────────
-                        // Monta linhas com produto_id ligando ao snapshot acima
+                        // ── INSERT de auditoria em catalogo_historico ─────────────────────
                         const idMap = new Map<string, string>();
                         for (const r of upsertedRows) idMap.set((r.produto_sku ?? r.produto_nome).toLowerCase(), r.id);
 
-                        const historicoLinhas = linhasNovas.map(item => [
-                            idMap.get((item.row[2] ?? item.row[1]).toLowerCase()) ?? null, // produto_id
-                            ...item.row,  // loja_id, nome, sku, preco, unidade, fonte
+                        const historicoLinhas = linhasNovas.map((item: any) => [
+                            idMap.get((item.row[2] ?? item.row[1]).toLowerCase()) ?? null,
+                            item.row[0], item.row[1], item.row[2], item.row[3], item.row[4], item.row[5],
                         ]);
-                        const histPlaceholders = historicoLinhas.map((_, i) =>
+                        const histPlaceholders = historicoLinhas.map((_: any, i: number) =>
                             `($${i*7+1},$${i*7+2},$${i*7+3},$${i*7+4},$${i*7+5},$${i*7+6},$${i*7+7})`
                         ).join(', ');
                         await client.query(
