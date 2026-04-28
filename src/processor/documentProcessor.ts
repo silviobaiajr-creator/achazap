@@ -6,7 +6,7 @@ import { CSVMapeamentoSchema, parseSafe } from '../ai/schemas.js';
 import { sendTextMessage, downloadMedia, sendInteractiveButtons } from '../lib/whatsapp.js';
 import { pool } from '../lib/db.js';
 import { limparContexto } from '../lib/redis-cloud.js';
-import { decomporProduto } from '../ai/skills/catalog-ledger.js';
+// decomporProduto é invocado pelo embeddingWorker em background, não durante importação
 import { boss } from '../queue/pgBossClient.js';
 
 // ─── Constantes de Segurança ──────────────────────────────────────────────────
@@ -219,13 +219,29 @@ JSON:`;
                 [loja.id]
             );
 
-            // Mapas de lookup O(1) — chave normalizada para lowercase sem espaços extras
-            const mapaPorSku  = new Map<string, { id: string; preco: number }>(); // sku  → {id, preço_atual}
-            const mapaPorNome = new Map<string, { id: string; preco: number }>(); // nome → {id, preço_atual}
+            // ── Regra do EAN Blindado ──────────────────────────────────────────────────
+            // EAN-13 Brasileiro: 13 dígitos, começa com 789 ou 790 → confiança máxima (imutável de fábrica)
+            // Código de balança / interno: qualquer outro formato → identidade baseada no Nome Exato
+            const isEanBlindado = (sku: string | null): boolean =>
+                !!sku && /^7(89|90)\d{10}$/.test(sku.trim());
+
+            // Mapas de lookup O(1)
+            const mapaEanBlindado = new Map<string, { id: string; preco: number; nome: string }>(); // EAN universal
+            const mapaSkuInterno  = new Map<string, { id: string; preco: number; nome: string }>(); // balança/interno
+            const mapaPorNome     = new Map<string, { id: string; preco: number }>(); // fallback por nome
+
             for (const r of catalogoAtual) {
                 const precoAtual = parseFloat(r.preco);
-                if (r.produto_sku) mapaPorSku.set(r.produto_sku.trim().toLowerCase(),  { id: r.id, preco: precoAtual });
-                mapaPorNome.set(r.produto_nome.trim().toLowerCase(), { id: r.id, preco: precoAtual });
+                const nomeNorm   = r.produto_nome.trim().toLowerCase();
+                if (r.produto_sku) {
+                    const skuNorm = r.produto_sku.trim();
+                    if (isEanBlindado(skuNorm)) {
+                        mapaEanBlindado.set(skuNorm, { id: r.id, preco: precoAtual, nome: r.produto_nome });
+                    } else {
+                        mapaSkuInterno.set(skuNorm.toLowerCase(), { id: r.id, preco: precoAtual, nome: r.produto_nome });
+                    }
+                }
+                mapaPorNome.set(nomeNorm, { id: r.id, preco: precoAtual });
             }
 
             // ── Processamento em chunks com Bulk INSERT ───────────────────────
@@ -235,7 +251,9 @@ JSON:`;
             for (let offset = 0; offset < records.length; offset += CHUNK_SIZE) {
                 const chunk = records.slice(offset, offset + CHUNK_SIZE);
                 await queryWithTimeout(async () => {
-                    const linhasNovas: any[] = [];
+                    // Listas separadas para INSERT e UPDATE — sem UPSERT cego
+                    const itensParaInserir: any[] = [];
+                    const itensParaAtualizar: any[] = []; // { id, nome, sku, preco, unidade, marca, metadados, nomeAntigoMudou }
 
                     for (const row of chunk) {
                         const nome  = String(row[mapa.coluna_nome] || '').trim();
@@ -249,114 +267,151 @@ JSON:`;
                         if (!nome || !preco || preco <= 0) { ignorados++; continue; }
 
                         const nomeNorm = nome.toLowerCase();
-                        const skuNorm  = sku ? sku.toLowerCase() : null;
-
-                        // ── Delta Check: SKU tem prioridade, depois Nome ───────────────────────
-                        const entradaPorSku  = skuNorm  ? mapaPorSku.get(skuNorm)   : undefined;
-                        const entradaPorNome = mapaPorNome.get(nomeNorm);
-                        const entrada        = entradaPorSku ?? entradaPorNome;
-                        const precoAtual     = entrada?.preco;
-                        const produtoId      = entrada?.id ?? null;
-
-                        const isNovo       = precoAtual === undefined;
-                        const precoMudou   = precoAtual !== undefined && Math.abs(precoAtual - preco) > 0.001;
-
-                        if (!isNovo && !precoMudou) {
-                            semAlteracao++;
-                            continue; // Mesmo produto, mesmo preço — não polui o banco
-                        }
+                        const metadados = categoria
+                            ? JSON.stringify({ categoria_planilha: categoria, estoque_atual: estoque ?? undefined })
+                            : null;
+                        const marcaSalva = marca_planilha?.substring(0, 100) ?? null;
+                        const unidadeSalva = unidade.substring(0, 30);
 
                         // Deduplica dentro do mesmo arquivo (ex: SKU repetido na planilha)
-                        const fp = skuNorm ?? nomeNorm;
+                        const fp = sku?.trim() ?? nomeNorm;
                         if (insertedThisRun.has(fp)) continue;
                         insertedThisRun.add(fp);
 
-                        // Atualiza mapa em memória p/ detecções subsequentes no mesmo upload
-                        if (skuNorm)  mapaPorSku.set(skuNorm, { id: produtoId ?? '', preco });
-                        mapaPorNome.set(nomeNorm, { id: produtoId ?? '', preco });
+                        // ── Regra EAN Blindado: decide a identidade do produto ─────────────
+                        let entrada: { id: string; preco: number; nome?: string } | undefined;
+                        let nomeAntigoMudou = false;
 
-                        linhasNovas.push({
-                            row: [
-                                loja.id,                    // $1 loja_id
-                                nome.substring(0, 250),     // $2 produto_nome
-                                sku,                        // $3 produto_sku
-                                preco,                      // $4 preco
-                                unidade.substring(0, 30),   // $5 unidade
-                                'csv',                      // $6 fonte_ingestao
-                                // Campos de decomposição direto do PDV (quando existem)
-                                null,                                                  // $7 membro_core — preenchido pelo embeddingWorker
-                                marca_planilha?.substring(0, 100) ?? null,             // $8 marca (direto do PDV)
-                                null,                                                  // $9 especificacao — preenchido pelo embeddingWorker
-                                mapa.coluna_unidade ? unidade.substring(0, 30) : null, // $10 unidade_medida (do PDV se mapeada)
-                                categoria ? JSON.stringify({ categoria_planilha: categoria, estoque_atual: estoque ?? undefined }) : null, // $11 metadados
-                            ]
-                        });
+                        if (sku && isEanBlindado(sku)) {
+                            // Código de fábrica universal: SKU é o dono da identidade
+                            entrada = mapaEanBlindado.get(sku.trim());
+                            if (entrada && (entrada as any).nome?.toLowerCase() !== nomeNorm) {
+                                nomeAntigoMudou = true; // O lojista corrigiu o nome pelo EAN
+                            }
+                        } else {
+                            // Código de balança ou sem SKU: Nome Exato é a identidade
+                            entrada = mapaPorNome.get(nomeNorm)
+                                ?? (sku ? mapaSkuInterno.get(sku.toLowerCase()) : undefined);
+                        }
+
+                        const precoAtual = entrada?.preco;
+                        const produtoId  = entrada?.id ?? null;
+                        const isNovo     = precoAtual === undefined;
+                        const precoMudou = precoAtual !== undefined && Math.abs(precoAtual - preco) > 0.001;
+
+                        if (!isNovo && !precoMudou && !nomeAntigoMudou) {
+                            semAlteracao++;
+                            continue;
+                        }
+
+                        // Atualiza mapas em memória para detecções subsequentes
+                        if (sku && isEanBlindado(sku))
+                            mapaEanBlindado.set(sku.trim(), { id: produtoId ?? '', preco, nome });
+                        mapaPorNome.set(nomeNorm, { id: produtoId ?? '', preco });
 
                         if (isNovo) {
                             inseridos++;
+                            itensParaInserir.push([
+                                loja.id, nome.substring(0, 250), sku, preco, unidadeSalva, 'csv',
+                                null, marcaSalva, null,
+                                mapa.coluna_unidade ? unidadeSalva : null,
+                                metadados,
+                            ]);
                         } else {
                             atualizados++;
+                            // Se o nome mudou pelo EAN, zeramos membro_core e embedding
+                            // para que o embeddingWorker regenere as tags com o novo nome
+                            itensParaAtualizar.push({
+                                id: produtoId!,
+                                nome: nomeAntigoMudou ? nome.substring(0, 250) : null,
+                                sku,
+                                preco,
+                                unidade: unidadeSalva,
+                                marca: marcaSalva,
+                                metadados,
+                                nomeAntigoMudou,
+                            });
                             if (amostraAtualizados.length < 10 && precoAtual !== undefined) {
-                                const pAntigo = precoAtual.toFixed(2).replace('.', ',');
-                                const pNovo = preco.toFixed(2).replace('.', ',');
-                                amostraAtualizados.push(`• ${nome}: R$ ${pAntigo} ➔ *R$ ${pNovo}*`);
+                                const label = nomeAntigoMudou
+                                    ? `• ${entrada?.nome} ➔ *${nome}*`
+                                    : `• ${nome}: R$ ${precoAtual.toFixed(2).replace('.', ',')} ➔ *R$ ${preco.toFixed(2).replace('.', ',')}*`;
+                                amostraAtualizados.push(label);
                             }
                         }
                     }
 
-                    // INSERT direto — sem chamada Gemini por linha.
-                    // Os campos de decomposição (membro_core, especificacao) que não vieram
-                    // do PDV ficam NULL e serão preenchidos pelo embeddingWorker em background.
-                    if (linhasNovas.length > 0) {
-                        await client.query('BEGIN');
+                    await client.query('BEGIN');
 
-                        // ── UPSERT em catalogo_ativo ──────────────────────────────────────
-                        const ativoPlaceholders = linhasNovas.map((_, i) =>
+                    // ── 1) INSERT de novos produtos ───────────────────────────────────────
+                    let idsInseridos: { id: string; produto_sku: string | null; produto_nome: string }[] = [];
+                    if (itensParaInserir.length > 0) {
+                        const insertPlaceholders = itensParaInserir.map((_, i) =>
                             `($${i*11+1},$${i*11+2},$${i*11+3},$${i*11+4},$${i*11+5},$${i*11+6},$${i*11+7},$${i*11+8},$${i*11+9},$${i*11+10},$${i*11+11})`
                         ).join(', ');
-                        const flatValues = linhasNovas.flatMap((item: any) => [
-                            item.row[0], item.row[1], item.row[2], item.row[3], item.row[4], item.row[5],
-                            item.row[6], item.row[7], item.row[8], item.row[9], item.row[10],
-                        ]);
-                        const { rows: upsertedRows } = await client.query<{ id: string; produto_nome: string; produto_sku: string | null }>(
+                        const { rows } = await client.query<{ id: string; produto_nome: string; produto_sku: string | null }>(
                             `INSERT INTO catalogo_ativo
                                  (loja_id, produto_nome, produto_sku, preco, unidade, fonte_ingestao,
                                   membro_core, marca, especificacao, unidade_medida, metadados)
-                             VALUES ${ativoPlaceholders}
-                             ON CONFLICT (loja_id, produto_nome) DO UPDATE
-                                 SET preco          = EXCLUDED.preco,
-                                     unidade        = EXCLUDED.unidade,
-                                     disponivel     = true,
-                                     fonte_ingestao = EXCLUDED.fonte_ingestao,
-                                     -- COALESCE: só atualiza se o PDV trouxe o valor (não sobrescreve com NULL)
-                                     marca          = COALESCE(EXCLUDED.marca,          catalogo_ativo.marca),
-                                     unidade_medida = COALESCE(EXCLUDED.unidade_medida, catalogo_ativo.unidade_medida),
-                                     metadados      = COALESCE(EXCLUDED.metadados,      catalogo_ativo.metadados),
-                                     atualizado_em  = now()
+                             VALUES ${insertPlaceholders}
                              RETURNING id, produto_nome, produto_sku`,
-                            flatValues
+                            itensParaInserir.flat()
                         );
+                        idsInseridos = rows;
+                    }
 
-                        // ── INSERT de auditoria em catalogo_historico ─────────────────────
-                        const idMap = new Map<string, string>();
-                        for (const r of upsertedRows) idMap.set((r.produto_sku ?? r.produto_nome).toLowerCase(), r.id);
+                    // ── 2) UPDATE explícito por UUID ──────────────────────────────────────
+                    // Garante que Nome e SKU podem ser corrigidos pelo EAN Blindado
+                    for (const u of itensParaAtualizar) {
+                        const sets: string[] = [
+                            'preco = $2', 'unidade = $3', 'disponivel = true',
+                            'atualizado_em = now()',
+                            'marca = COALESCE($4, marca)',
+                            'metadados = COALESCE($5, metadados)',
+                        ];
+                        const vals: any[] = [u.id, u.preco, u.unidade, u.marca, u.metadados];
+                        if (u.nomeAntigoMudou && u.nome) {
+                            // Nome corrigido pelo EAN: atualiza e força re-decomposição em background
+                            sets.push(`produto_nome = $${vals.length + 1}`);
+                            vals.push(u.nome);
+                            sets.push(`membro_core = NULL`);
+                            sets.push(`embedding = NULL`);
+                        }
+                        if (u.sku !== undefined) {
+                            sets.push(`produto_sku = $${vals.length + 1}`);
+                            vals.push(u.sku);
+                        }
+                        await client.query(
+                            `UPDATE catalogo_ativo SET ${sets.join(', ')} WHERE id = $1`,
+                            vals
+                        );
+                    }
 
-                        const historicoLinhas = linhasNovas.map((item: any) => [
-                            idMap.get((item.row[2] ?? item.row[1]).toLowerCase()) ?? null,
-                            item.row[0], item.row[1], item.row[2], item.row[3], item.row[4], item.row[5],
-                        ]);
-                        const histPlaceholders = historicoLinhas.map((_: any, i: number) =>
+                    // ── 3) INSERT de auditoria em catalogo_historico ──────────────────────
+                    const todosIds: { id: string; loja_id: string; nome: string; sku: string | null; preco: number; unidade: string }[] = [
+                        ...idsInseridos.map(r => ({ id: r.id, loja_id: loja.id, nome: r.produto_nome, sku: r.produto_sku, preco: 0, unidade: 'un' })),
+                        ...itensParaAtualizar.map(u => ({ id: u.id, loja_id: loja.id, nome: u.nome ?? '', sku: u.sku, preco: u.preco, unidade: u.unidade })),
+                    ];
+
+                    // Enriquece com preco correto para os inseridos
+                    for (const ins of idsInseridos) {
+                        const found = itensParaInserir.find(r => r[1] === ins.produto_nome);
+                        const entry = todosIds.find(e => e.id === ins.id);
+                        if (found && entry) { entry.preco = found[3]; entry.unidade = found[4]; }
+                    }
+
+                    if (todosIds.length > 0) {
+                        const histPlaceholders = todosIds.map((_: any, i: number) =>
                             `($${i*7+1},$${i*7+2},$${i*7+3},$${i*7+4},$${i*7+5},$${i*7+6},$${i*7+7})`
                         ).join(', ');
                         await client.query(
                             `INSERT INTO catalogo_historico
                                  (produto_id, loja_id, produto_nome, produto_sku, preco, unidade, fonte_ingestao)
                              VALUES ${histPlaceholders}`,
-                            historicoLinhas.flat()
+                            todosIds.flatMap(e => [e.id, e.loja_id, e.nome, e.sku, e.preco, e.unidade, 'csv'])
                         );
-
-                        await client.query('COMMIT');
                     }
+
+                    await client.query('COMMIT');
                 }, CHUNK_TIMEOUT_MS, `chunk ${offset}`);
             }
         } finally {
