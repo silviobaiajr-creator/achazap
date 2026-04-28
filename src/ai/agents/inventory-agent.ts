@@ -36,17 +36,17 @@ async function processarDadosProduto(from: string, loja: any, userMessageText: s
 
 Regras:
 1. Extraia TODOS os produtos da mensagem (ex: "Coca 5,00, guaraná 4,50" = 2 produtos)
-2. Preços com vírgula → converter para ponto
+2. PREÇO: Extraia sempre que houver um valor numérico próximo ao nome (ex: "por 9", "9 reais", "9,00"). Use vírgula como ponto.
 3. Nome em Title Case, Unidade máx 30 chars (padrão "un")
-4. Se a mensagem contém APENAS o nome de 1 produto sem preço (ex: "Leite"), NÃO marque ruído. Retorne como incompleto=true e falta="preco".
+4. Se a mensagem NÃO contém preço mas tem nome (ex: apenas "Leite"), retorne incompleto=true e falta="preco".
 5. Se for ruído real ou conversa fiada, marque ruido_detectado=true.
 ${avisoContexto}
 
-Retorne formato:
-- Se múltiplos: {"ruido_detectado": false, "itens": [{"nome": "Coca Cola", "preco": 5.00, "unidade": "un"}, {outro}]}
-- Se ruído: {"ruido_detectado": true}
+Retorne formato JSON:
+- Se múltiplos: {"ruido_detectado": false, "itens": [{"nome": "...", "preco": ..., "unidade": "..."}]}
+- Se apenas um ok: {"ruido_detectado": false, "incompleto": false, "nome": "...", "preco": ..., "unidade": "..."}
 - Se apenas um incompleto: {"ruido_detectado": false, "incompleto": true, "falta": "preco", "nome": "..."}
-- Se apenas um ok: {"ruido_detectado": false, "nome": "...", "preco": ..., "unidade": "..."}
+- Se ruído: {"ruido_detectado": true}
 
 Mensagem: "${userMessageText}"
 
@@ -73,16 +73,23 @@ JSON:`;
             itens: []
         });
 
-        // Se detectou múltiplos produtos, entra no fluxo de lote
-        if (!dadosMulti.ruido_detectado && dadosMulti.itens && dadosMulti.itens.length > 1) {
-            logger.info({ from, count: dadosMulti.itens.length }, '[processarDadosProduto] Múltiplos produtos detectados');
+        // Se detectou múltiplos produtos (ou um único item dentro de um array), entra no fluxo de lote
+        if (!dadosMulti.ruido_detectado && dadosMulti.itens && dadosMulti.itens.length > 0) {
+            logger.info({ from, count: dadosMulti.itens.length }, '[processarDadosProduto] Itens em array detectados');
             const itensFormatados = dadosMulti.itens.map((i: any) => ({
                 nome: i.nome,
                 preco: i.preco,
                 unidade: i.unidade || 'un'
             }));
-            await processarLoteProdutos(from, loja, itensFormatados, contexto);
-            return;
+
+            if (itensFormatados.length > 1) {
+                await processarLoteProdutos(from, loja, itensFormatados, contexto);
+                return;
+            } else if (itensFormatados.length === 1 && itensFormatados[0].preco > 0) {
+                // Se for apenas um item no array e tiver preço, prossegue como item único
+                await avançarParaSimilaresOuSalvar(from, loja, contexto, itensFormatados[0]);
+                return;
+            }
         }
 
         const dados = parseSafe(ProdutoExtraidoSchema, rawTextSanitizado, {
