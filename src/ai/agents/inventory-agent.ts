@@ -14,6 +14,8 @@ import { rotearIntencaoGlobal, batchRefinarCandidatosBusca } from '../skills/int
 import { processarMidia, processLoteProdutos, formatarCartaoProduto } from '../skills/vision-processor.js';
 import { enviarMenu, executarFuga } from '../shared.js';
 import { calcularSeloFrescor } from '../skills/revisor.js';
+import { boss } from '../../queue/pgBossClient.js';
+
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
@@ -435,6 +437,7 @@ async function avançarParaSimilaresOuSalvar(from: string, loja: any, contexto: 
             ? `✅ Produto *${produto.nome}* (${produto.unidade}) a *R$ ${produto.preco}* cadastrado com sucesso!`
             : `⚠️ Produto *${produto.nome}* com o mesmo preço já existe no seu catálogo. Nenhuma alteração foi feita.`;
         await sendTextMessage(from, msg);
+        await boss.send('sync-embeddings', { lojaId: loja.id });
         await limparContexto(from);
         await delay(400);
         await enviarMenu(loja.nome, from);
@@ -611,6 +614,7 @@ export async function handleInventory(
             }
 
             await sendTextMessage(from, mensagemFinal.trim());
+            await boss.send('sync-embeddings', { lojaId: loja.id });
             await limparContexto(from);
             await delay(400);
             await enviarMenu(loja.nome, from);
