@@ -60,10 +60,11 @@ JSON:`;
         });
 
         const rawText = result.text || '{}';
-        // Armadilha 12: Sanitização de Vírgula Brasileira
+        // Armadilha 12: Sanitização de Vírgula Brasileira e Tipagem
         // Converte preços com vírgula (ex: 15,90) para ponto (15.90) dentro do JSON
-        // ANTES de passar pelo Zod, evitando rejeição de tipo em respostas numéricas.
-        const rawTextSanitizado = rawText.replace(/"preco"\s*:\s*([\d]+),([\d]+)/g, '"preco": $1.$2');
+        // E remove aspas se o Gemini retornar o número como string (ex: "9,00" -> 9.00)
+        let rawTextSanitizado = rawText.replace(/"preco"\s*:\s*"([^"]+)"/g, '"preco": $1');
+        rawTextSanitizado = rawTextSanitizado.replace(/"preco"\s*:\s*([\d]+),([\d]+)/g, '"preco": $1.$2');
         logTokens('extrair_produto', from, loja?.id ?? 'unknown', result.usageMetadata);
         logger.debug({ from, rawTextSanitizado }, '[Gemini] extração produto');
 
