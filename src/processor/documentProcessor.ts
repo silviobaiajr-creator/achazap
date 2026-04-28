@@ -172,13 +172,29 @@ Retorne APENAS o JSON mapeando os nomes reais das colunas encontradas na amostra
 
 JSON:`;
 
-        const result = await ai.models.generateContent({
-            model: GEMINI_MODEL,
-            contents: promptMapeamento,
-            config: { responseMimeType: 'application/json' },
-        });
-
-        const mapa = parseSafe(CSVMapeamentoSchema, result.text || '{}', null as any);
+        let mapa: any = {};
+        try {
+            const result = await ai.models.generateContent({
+                model: GEMINI_MODEL,
+                contents: promptMapeamento,
+                config: { responseMimeType: 'application/json' },
+            });
+            mapa = parseSafe(CSVMapeamentoSchema, result.text || '{}', null as any);
+        } catch (aiErr: any) {
+            logger.warn({ err: aiErr }, '[DOC] Gemini indisponível para mapear colunas. Usando fallback offline.');
+            // Fallback: Busca manual pelas colunas de "Nome" e "Preço" na primeira linha
+            const primeiraLinha = records[0] || {};
+            const chaves = Object.keys(primeiraLinha);
+            mapa = {
+                coluna_nome: chaves.find(k => /nome|descri[cç][aã]o|produto|item/i.test(k)),
+                coluna_preco: chaves.find(k => /pre[cç]o|valor|venda|custo/i.test(k)),
+                coluna_unidade: chaves.find(k => /unidade|medida|und/i.test(k)),
+                coluna_sku: chaves.find(k => /sku|c[oó]digo|ean|barra/i.test(k)),
+                coluna_marca: chaves.find(k => /marca|fabricante/i.test(k)),
+                coluna_categoria: chaves.find(k => /categoria|departamento|se[cç][aã]o/i.test(k)),
+                coluna_estoque: chaves.find(k => /estoque|qtd|quantidade/i.test(k)),
+            };
+        }
 
         if (!mapa?.coluna_nome || !mapa?.coluna_preco) {
             await sendTextMessage(from, '❌ Não identifiquei as colunas de "Nome" e "Preço". Verifique o cabeçalho e tente novamente.');
