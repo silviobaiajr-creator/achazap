@@ -252,6 +252,7 @@ JSON:`;
         }
 
         // Busca similares (peneira) e continua o fluxo
+        await sendTextMessage(from, '⏳ Verificando no estoque...');
         await avançarParaSimilaresOuSalvar(from, loja, contexto, produto);
 
     } catch (err) {
