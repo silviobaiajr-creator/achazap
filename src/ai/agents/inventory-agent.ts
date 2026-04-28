@@ -879,7 +879,8 @@ export async function handleInventory(
             const [indiceStr] = contexto.acao.split('_');
             const indiceReal = parseInt(indiceStr, 10);
             const item = lista[indiceReal];
-            const textoLimpo = userMessageText.trim().toLowerCase();
+            const inputNumeric = isInteractive ? buttonId : userMessageText;
+            const textoLimpo = inputNumeric.trim().toLowerCase();
             let opcaoNum = parseInt(textoLimpo, 10);
             
             // Mapa NLP estático interno
@@ -1092,7 +1093,8 @@ export async function handleInventory(
     // ══════════════════════════════════════════════════════════
     if (contexto.estado === EstadosFluxo.AGUARDANDO_ACAO_SIMILARES) {
 
-        const textoNum = userMessageText.trim().toLowerCase();
+        const inputNumeric = isInteractive ? buttonId : userMessageText;
+        const textoNum = inputNumeric.trim().toLowerCase();
         const opcaoNum = parseInt(textoNum, 10);
         const similares = contexto.similaresEncontrados ?? [];
 
