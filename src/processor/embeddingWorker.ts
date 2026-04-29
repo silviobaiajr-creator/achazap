@@ -14,6 +14,10 @@ export async function startEmbeddingWorker() {
         let totalEmbeddings = 0;
         let totalDecompostos = 0;
         let hasMore = true;
+        
+        // Proteção contra Loop Infinito (Custo/Rate Limit):
+        // Se a API falhar para um ID, ignoramos ele nas próximas buscas deste job
+        const idsFalhos = new Set<string>();
 
         while (hasMore) {
             const client = await pool.connect();
@@ -35,8 +39,13 @@ export async function startEmbeddingWorker() {
                 const params: any[] = [];
 
                 if (lojaId) {
-                    query += ` AND loja_id = $1`;
+                    query += ` AND loja_id = $${params.length + 1}`;
                     params.push(lojaId);
+                }
+
+                if (idsFalhos.size > 0) {
+                    query += ` AND id != ALL($${params.length + 1})`;
+                    params.push(Array.from(idsFalhos));
                 }
 
                 query += ` LIMIT $${params.length + 1}`;
@@ -123,7 +132,13 @@ export async function startEmbeddingWorker() {
                         `UPDATE catalogo_ativo SET ${sets.join(', ')} WHERE id = $${idx}`,
                         vals
                     );
-                    if (u.vetor) totalEmbeddings++;
+                    
+                    if (u.vetor) {
+                        totalEmbeddings++;
+                    } else {
+                        // Se não gerou vetor (falha na API), adiciona aos falhos para evitar loop infinito
+                        idsFalhos.add(u.id);
+                    }
                 }
 
                 // Delay para respeitar rate limit da API (lotes de 10 com 1s de intervalo)
