@@ -5,6 +5,7 @@
  */
 import pino from 'pino';
 import { enviarLogAuditoria } from './audit.js';
+import { incrementarTokens } from './redis-cloud.js';
 
 // --- Configuração do Logger Principal ---
 const pinoLogger = pino({
@@ -79,7 +80,8 @@ export function logTokens(
     }
 ) {
     if (!usageMetadata) return;
-    const tokensMsg = `[Gemini] ${operacao} — ${usageMetadata.totalTokenCount ?? '?'} tokens`;
+    const total = usageMetadata.totalTokenCount ?? 0;
+    const tokensMsg = `[Gemini] ${operacao} — ${total} tokens`;
     
     logger.info({
         tipo: 'gemini_tokens',
@@ -88,8 +90,17 @@ export function logTokens(
         loja_id: lojaId,
         tokens_entrada: usageMetadata.promptTokenCount ?? 0,
         tokens_saida:   usageMetadata.candidatesTokenCount ?? 0,
-        tokens_total:   usageMetadata.totalTokenCount ?? 0,
+        tokens_total:   total,
     }, tokensMsg);
-    
-    // O envio para enviarLogAuditoria agora é automático via logger.info
+
+    // ── Fusível Financeiro: contabiliza tokens por número ─────────────────
+    // O 'from' pode ser 'system' (worker de embedding) — ignoramos esses.
+    if (from && from !== 'system' && total > 0) {
+        const status = incrementarTokens(from, total);
+        if (status === 'aviso') {
+            logger.warn({ from, operacao, total }, '[TokenFuse] ⚠️ 80% do limite diário atingido — atenção ao uso!');
+        } else if (status === 'bloqueado') {
+            logger.error({ from, operacao, total }, '[TokenFuse] 🔴 Limite diário de tokens ATINGIDO — número bloqueado até meia-noite.');
+        }
+    }
 }

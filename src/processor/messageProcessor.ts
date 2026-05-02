@@ -3,6 +3,8 @@ import type { WhatsAppMessage } from '../lib/whatsapp.js';
 import { logger } from '../lib/logger.js';
 import { boss } from '../queue/pgBossClient.js';
 import { logErroCritico } from '../lib/monitor.js';
+import { verificarBloqueioTokens, getTokensUsados } from '../lib/redis-cloud.js';
+import { sendTextMessage } from '../lib/whatsapp.js';
 
 /**
  * Inicializador da rotina que desempilha mensagens do banco.
@@ -34,7 +36,18 @@ export async function startMessageWorker() {
                 contexto: 'PROCESSOR'
             }, `[Processor] Job iniciado — tipo: ${message.type}`);
 
+            // ── Fusível Financeiro: bloqueia ANTES de chamar qualquer modelo ────
+            if (message.from && verificarBloqueioTokens(message.from)) {
+                const total = getTokensUsados(message.from);
+                logger.warn({ from: message.from, total, contexto: 'FUSE' }, '[TokenFuse] Mensagem bloqueada por limite diário de tokens.');
+                await sendTextMessage(message.from,
+                    '⚠️ *Limite diário de processamento atingido.*\n\nPara garantir a saúde financeira do sistema, as operações com IA ficam pausadas até a meia-noite. Tente novamente mais tarde! 🙏'
+                );
+                return;
+            }
+
             await processMessage(message);
+
 
             logger.info({ 
                 jobId: msgId, 
