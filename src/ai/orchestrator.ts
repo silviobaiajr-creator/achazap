@@ -853,8 +853,8 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
 
         try {
             await sendTextMessage(from, '⏳ Buscando no seu estoque...');
-            // Agora usa buscarProdutosSimilares para aplicar o Reranking do Gemini e evitar falsos positivos
-            const similares = await buscarProdutosSimilares(loja.id, userMessageText);
+            // Agora usa buscarProdutosSimilares com modo busca_ampla para Reranking inclusivo
+            const similares = await buscarProdutosSimilares(loja.id, userMessageText, 'busca_ampla');
             
             if (!similares || similares.length === 0) {
                 await sendTextMessage(from, `❌ Não encontrei "${userMessageText}" no seu estoque.\n\nVerifique o nome e tente novamente, ou cadastre o produto primeiro.`);

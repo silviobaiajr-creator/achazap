@@ -156,7 +156,8 @@ export async function buscarSimilaresSemanticoRaw(lojaId: string, termoBusca: st
  */
 export async function buscarProdutosSimilares(
     lojaId: string,
-    termoBusca: string
+    termoBusca: string,
+    modo: 'cadastro' | 'busca_ampla' = 'cadastro'
 ): Promise<Array<{ id: string; produto_nome: string; preco: number; unidade: string; atualizado_em?: string | null }>> {
 
     let candidatos = await buscarSimilaresSemanticoRaw(lojaId, termoBusca);
@@ -187,17 +188,29 @@ export async function buscarProdutosSimilares(
         })
         .join('\n');
 
-    try {
-        const result = await ai.models.generateContent({
-            model: GEMINI_MODEL,
-            contents: `Você é um especialista em catálogos de supermercado.
-O lojista quer cadastrar/atualizar o produto: "${termoBusca}".
+    const promptCadastro = `O lojista quer cadastrar/atualizar o produto: "${termoBusca}".
 Identifique no estoque abaixo QUAIS itens são EXATAMENTE o mesmo produto ou uma variação direta.
 
 REGRAS (em ordem de prioridade):
-1. MARCA: Se o termo buscado contém uma marca (ex: "Ninho", "Itambé", "Oregon"), SOMENTE aceite candidatos da MESMA marca. Marcas diferentes = produtos diferentes. REJEITE.
-2. ESPECIFICAÇÃO: Se o termo contém tipo ou preparo (ex: "Integral", "Recheado", "Vácuo"), REJEITE candidatos com tipo diferente.
-3. GENÉRICO: Se a busca for genérica sem marca (ex: apenas "Café"), selecione todos os cafés da lista. Só descarte se for algo totalmente diferente.
+1. MARCA: Se o termo buscado contém uma marca (ex: "Ninho", "Itambé"), SOMENTE aceite candidatos da MESMA marca.
+2. ESPECIFICAÇÃO: Se o termo contém tipo ou preparo (ex: "Integral"), REJEITE candidatos com tipo diferente.
+3. GENÉRICO: Se a busca for genérica sem marca (ex: apenas "Café"), selecione todos os cafés da lista. Só descarte se for algo totalmente diferente.`;
+
+    const promptBuscaAmpla = `O usuário pesquisou por: "${termoBusca}".
+Seu objetivo é atuar como um filtro de relevância para remover falsos positivos bizarros.
+Selecione TODOS os itens do estoque abaixo que sejam de fato correspondentes ao termo buscado.
+
+REGRAS:
+1. Se o usuário buscou uma categoria ampla (ex: "Leite", "Arroz", "Cerveja"), RETORNE TODOS os itens que pertencem a essa categoria.
+2. Se o usuário buscou um item específico (ex: "Leite Ninho"), RETORNE APENAS itens que batam com a especificação.
+3. REJEITE FALSOS POSITIVOS GROSSEIROS (ex: se buscou "Leite", NÃO retorne "Óleo de Soja" ou "Doce de Leite").`;
+
+    const instructions = modo === 'cadastro' ? promptCadastro : promptBuscaAmpla;
+
+    try {
+        const result = await ai.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: `Você é um especialista em catálogos de supermercado.\n\n${instructions}
 
 Estoque:
 ${catalogList}
