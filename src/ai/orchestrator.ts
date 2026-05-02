@@ -818,6 +818,34 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     // CENÁRIO: Panfleto — Passo 1 (busca o produto no estoque)
     // ══════════════════════════════════════════════════════════
     if (contexto.estado === EstadosFluxo.PANFLETO_AGUARDANDO_PRODUTO) {
+        
+        // Se for um clique num botão de desambiguação
+        if (isInteractive && buttonId.startsWith('panfleto_')) {
+            const idEscolhido = buttonId.replace('panfleto_', '');
+            const selecionado = contexto.similaresEncontrados?.find((p: any) => p.id === idEscolhido);
+            
+            if (!selecionado) {
+                await sendTextMessage(from, '❌ Produto não encontrado. Vamos recomeçar. Digite o nome do produto:');
+                return;
+            }
+
+            await salvarContexto(from, {
+                ...contexto,
+                estado: EstadosFluxo.PANFLETO_AGUARDANDO_PRECO,
+                panfleto_produto_id:   selecionado.id,
+                panfleto_produto_nome: selecionado.produto_nome,
+            });
+
+            await sendTextMessage(from,
+                `✅ Escolhido: *${selecionado.produto_nome}*\n` +
+                `Preço atual: R$ ${Number(selecionado.preco).toFixed(2)}\n\n` +
+                `⚡ Qual o *preço especial de hoje*? (Ex: *8,50*)\n\n` +
+                `_A oferta expira automaticamente à meia-noite._`
+            );
+            return;
+        }
+
+        // Se for texto digitado (busca de produto)
         if (!userMessageText.trim()) {
             await sendTextMessage(from, 'Digite o nome do produto que quer destacar hoje.');
             return;
@@ -826,25 +854,44 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         try {
             await sendTextMessage(from, '⏳ Buscando no seu estoque...');
             const similares = await buscarSimilaresSemanticoRaw(loja.id, userMessageText);
+            
             if (!similares || similares.length === 0) {
                 await sendTextMessage(from, `❌ Não encontrei "${userMessageText}" no seu estoque.\n\nVerifique o nome e tente novamente, ou cadastre o produto primeiro.`);
                 return;
             }
 
-            const melhor = similares[0];
-            await salvarContexto(from, {
-                ...contexto,
-                estado: EstadosFluxo.PANFLETO_AGUARDANDO_PRECO,
-                panfleto_produto_id:   melhor.id,
-                panfleto_produto_nome: melhor.produto_nome,
-            });
+            if (similares.length === 1) {
+                const melhor = similares[0];
+                await salvarContexto(from, {
+                    ...contexto,
+                    estado: EstadosFluxo.PANFLETO_AGUARDANDO_PRECO,
+                    panfleto_produto_id:   melhor.id,
+                    panfleto_produto_nome: melhor.produto_nome,
+                });
 
-            await sendTextMessage(from,
-                `✅ Encontrei: *${melhor.produto_nome}*\n` +
-                `Preço atual: R$ ${Number(melhor.preco).toFixed(2)}\n\n` +
-                `⚡ Qual o *preço especial de hoje*? (Ex: *8,50*)\n\n` +
-                `_A oferta expira automaticamente à meia-noite._`
-            );
+                await sendTextMessage(from,
+                    `✅ Encontrei: *${melhor.produto_nome}*\n` +
+                    `Preço atual: R$ ${Number(melhor.preco).toFixed(2)}\n\n` +
+                    `⚡ Qual o *preço especial de hoje*? (Ex: *8,50*)\n\n` +
+                    `_A oferta expira automaticamente à meia-noite._`
+                );
+            } else {
+                const topo = similares.slice(0, 3);
+                await salvarContexto(from, {
+                    ...contexto,
+                    estado: EstadosFluxo.PANFLETO_AGUARDANDO_PRODUTO,
+                    similaresEncontrados: topo,
+                });
+
+                let msg = `🤔 Encontrei alguns produtos parecidos. Qual deles você quer colocar em Oferta Relâmpago?\n\n`;
+                const botoes = topo.map((p: any, index: number) => {
+                    msg += `*${index + 1}*) ${p.produto_nome} (R$ ${Number(p.preco).toFixed(2)})\n`;
+                    return { id: `panfleto_${p.id}`, title: `Opção ${index + 1}` };
+                });
+                msg += `\nClique na opção correta:`;
+                await sendInteractiveButtons(from, msg, botoes);
+            }
+
         } catch (err) {
             logger.error({ err, from }, '[Panfleto] Erro ao buscar produto');
             await sendTextMessage(from, '❌ Erro ao buscar no estoque. Tente novamente ou digita o nome diferente.');
