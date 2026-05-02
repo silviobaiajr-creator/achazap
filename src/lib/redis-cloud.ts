@@ -164,12 +164,15 @@ export function verificarHashMidia(whatsapp: string, hashHex: string): boolean {
 
 // Limites diários por número de telefone
 const TOKEN_LIMITE_NORMAL  = 500_000;   // Uso normal: ~400 mensagens/dia
+const TOKEN_LIMITE_PREMIUM = 1_500_000; // Lojas Premium: ~1200 mensagens/dia
 const TOKEN_LIMITE_IMPORTACAO = 5_000_000; // Importação de estoque grande (primeiro uso)
 const TOKEN_AVISO_PERCENT  = 0.8;       // Avisa o operador ao atingir 80%
+
 
 interface TokenBucket {
     total: number;
     avisado: boolean;
+    limiteDiario: number;
 }
 
 /**
@@ -188,22 +191,24 @@ function msMeianoite(): number {
  */
 export function incrementarTokens(whatsapp: string, tokens: number, limiteCustom?: number): 'ok' | 'aviso' | 'bloqueado' {
     const key = `tokens_dia:${whatsapp}`;
-    const limite = limiteCustom ?? TOKEN_LIMITE_NORMAL;
     const ttl = msMeianoite();
 
     const entry = cache.get(key) as TokenBucket | null;
     const atual = entry?.total ?? 0;
     const novoTotal = atual + tokens;
+    // Se não passar limite, mantém o que já estava no bucket (caso tenha sido atualizado por um login premium)
+    const limiteReal = limiteCustom ?? entry?.limiteDiario ?? TOKEN_LIMITE_NORMAL;
 
     const bucket: TokenBucket = {
         total: novoTotal,
         avisado: entry?.avisado ?? false,
+        limiteDiario: limiteReal
     };
 
     cache.set(key, bucket, ttl);
 
-    if (novoTotal >= limite) return 'bloqueado';
-    if (!bucket.avisado && novoTotal >= limite * TOKEN_AVISO_PERCENT) {
+    if (novoTotal >= limiteReal) return 'bloqueado';
+    if (!bucket.avisado && novoTotal >= limiteReal * TOKEN_AVISO_PERCENT) {
         // Marca como avisado para não repetir o aviso
         cache.set(key, { ...bucket, avisado: true }, ttl);
         return 'aviso';
@@ -215,10 +220,10 @@ export function incrementarTokens(whatsapp: string, tokens: number, limiteCustom
  * Verifica se o número já está bloqueado ANTES de chamar a API.
  * Use isso no início de cada job para evitar desperdício.
  */
-export function verificarBloqueioTokens(whatsapp: string, limiteCustom?: number): boolean {
+export function verificarBloqueioTokens(whatsapp: string): boolean {
     const key = `tokens_dia:${whatsapp}`;
-    const limite = limiteCustom ?? TOKEN_LIMITE_NORMAL;
     const entry = cache.get(key) as TokenBucket | null;
+    const limite = entry?.limiteDiario ?? TOKEN_LIMITE_NORMAL;
     return (entry?.total ?? 0) >= limite;
 }
 
@@ -231,5 +236,5 @@ export function getTokensUsados(whatsapp: string): number {
     return entry?.total ?? 0;
 }
 
-export { TOKEN_LIMITE_NORMAL, TOKEN_LIMITE_IMPORTACAO };
+export { TOKEN_LIMITE_NORMAL, TOKEN_LIMITE_PREMIUM, TOKEN_LIMITE_IMPORTACAO };
 

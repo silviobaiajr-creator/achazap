@@ -12,6 +12,8 @@ import {
 import {
     limparContexto,
     cache,
+    incrementarTokens,
+    TOKEN_LIMITE_PREMIUM
 } from '../lib/redis-cloud.js';
 import { supabaseAdmin as supabase } from '../lib/supabase.js';
 import { EstadosFluxo, ContextoSessao } from './types.js';
@@ -76,19 +78,22 @@ export async function buscarPerfilLoja(whatsapp: string) {
     const whatsappNormalizado = whatsapp.replace(/\D/g, '');
     let { data } = await supabase
         .from('lojas')
-        .select('id, nome, cidade, bairro, estado, saldo_cliques, ativa')
+        .select('id, nome, cidade, bairro, estado, saldo_cliques, ativa, plano')
         .eq('whatsapp', '+' + whatsappNormalizado)
         .single();
 
     if (!data) {
         ({ data } = await supabase
             .from('lojas')
-            .select('id, nome, cidade, bairro, estado, saldo_cliques, ativa')
+            .select('id, nome, cidade, bairro, estado, saldo_cliques, ativa, plano')
             .eq('whatsapp', whatsappNormalizado)
             .single());
     }
 
     if (data) {
+        if (data.plano === 'premium') {
+            incrementarTokens(whatsapp, 0, TOKEN_LIMITE_PREMIUM);
+        }
         try { cache.set(cacheKey, data, 300 * 1000); } catch { /* ignora */ }
     }
     return data ?? null;
