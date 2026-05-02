@@ -34,10 +34,10 @@ const MENU_SECTIONS = [
         ],
     },
     {
-        title: 'Ofertas',
+        title: 'Vendas & Marketing',
         rows: [
-            { id: 'menu_ofertas',    title: 'Criar Ofertas',      description: 'Desconto por ticket mínimo' },
-            { id: 'menu_ver_ativas', title: 'Ver Ofertas Ativas',  description: 'Listar ofertas cadastradas' },
+            { id: 'menu_panfleto',   title: 'Oferta Relâmpago (⚡)', description: 'Destacar um produto SÓ HOJE' },
+            { id: 'menu_ofertas',    title: 'Cupom Global',          description: 'Desconto p/ toda a loja' },
         ],
     },
     {
@@ -56,9 +56,10 @@ export async function enviarMenu(lojaNome: string, from: string): Promise<void> 
             from,
             `Olá ${nomeSeguro}! O que você gostaria de fazer?\n\n` +
             `1 - Cadastrar/Atualizar produto\n` +
-            `2 - Criar Ofertas\n` +
-            `3 - Ver Ofertas Ativas\n` +
-            `4 - Ver Estatísticas\n\n` +
+            `2 - Revisar Preços\n` +
+            `3 - Lançar Oferta Relâmpago (Panfleto)\n` +
+            `4 - Criar Cupom Global\n` +
+            `5 - Ver Estatísticas\n\n` +
             `Digite o número da opção desejada.`
         );
     }
