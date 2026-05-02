@@ -41,8 +41,8 @@ import {
 import { ai, GEMINI_MODEL } from '../lib/gemini.js';
 
 // ── Skills importadas (Fase 1 de Modularização) ──────────────────────────────
-import { buscarProdutosSimilares, ingeriCatalogo, atualizarPrecoLedger, retirarEstoqueLedger, gerarEmbedding } from './skills/catalog-ledger.js';
-import { obterEstatisticas, criarOferta, buscarOfertasAtivas } from './skills/store-services.js';
+import { buscarProdutosSimilares, ingeriCatalogo, atualizarPrecoLedger, retirarEstoqueLedger, gerarEmbedding, buscarSimilaresSemanticoRaw } from './skills/catalog-ledger.js';
+import { obterEstatisticas, criarOferta, buscarOfertasAtivas, ativarPanfleto } from './skills/store-services.js';
 import { detectarFugaNLP, detectarIntencaoProativa, refinarCandidatosBusca, extrairListaCompras, rotearIntencaoGlobal } from './skills/intent-detector.js';
 import { processarRevisaoPrecos, calcularSeloFrescor } from './skills/revisor.js';
 import { processarMidia, processLoteProdutos, formatarCartaoProduto } from './skills/vision-processor.js';
@@ -71,10 +71,10 @@ const MENU_SECTIONS = [
         ],
     },
     {
-        title: 'Ofertas',
+        title: 'Vendas & Marketing',
         rows: [
-            { id: 'menu_ofertas',     title: 'Criar Ofertas',    description: 'Desconto por ticket mínimo' },
-            { id: 'menu_ver_ativas',  title: 'Ver Ofertas Ativas', description: 'Listar ofertas cadastradas' },
+            { id: 'menu_panfleto',   title: 'Oferta Relâmpago (⚡)', description: 'Destacar um produto SÓ HOJE' },
+            { id: 'menu_ofertas',    title: 'Cupom Global',          description: 'Desconto p/ toda a loja' },
         ],
     },
     {
@@ -620,6 +620,16 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
             return;
         }
 
+        if (acao === 'panfleto') {
+            await salvarContexto(from, {
+                estado: EstadosFluxo.PANFLETO_AGUARDANDO_PRODUTO,
+                acao: 'panfleto',
+                retries: 0,
+            });
+            await sendTextMessage(from, '⚡ *Oferta Relâmpago!*\n\nQual produto você quer destacar *só hoje*?\n\nDigite o nome do produto (ex: *Arroz 5kg*) e eu busco no seu estoque.');
+            return;
+        }
+
         if (acao === 'estatisticas') {
             const stats = await obterEstatisticas(loja.id);
             await sendTextMessage(from, `📊 *Estatísticas da sua loja:*\n\nSaldo de cliques: ${stats.saldo}\nStatus: ${stats.status}\nCliques (30 dias): ${stats.cliques_30d}`);
@@ -800,6 +810,82 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         } catch (err) {
             logger.error({ err, from }, '[Oferta] Erro ao processar');
             await sendTextMessage(from, 'Não consegui criar a oferta. Envie: Valor mínimo (R$), Percentual (%) e Data de validade.');
+        }
+        return;
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // CENÁRIO: Panfleto — Passo 1 (busca o produto no estoque)
+    // ══════════════════════════════════════════════════════════
+    if (contexto.estado === EstadosFluxo.PANFLETO_AGUARDANDO_PRODUTO) {
+        if (!userMessageText.trim()) {
+            await sendTextMessage(from, 'Digite o nome do produto que quer destacar hoje.');
+            return;
+        }
+
+        try {
+            await sendTextMessage(from, '⏳ Buscando no seu estoque...');
+            const similares = await buscarSimilaresSemanticoRaw(loja.id, userMessageText);
+            if (!similares || similares.length === 0) {
+                await sendTextMessage(from, `❌ Não encontrei "${userMessageText}" no seu estoque.\n\nVerifique o nome e tente novamente, ou cadastre o produto primeiro.`);
+                return;
+            }
+
+            const melhor = similares[0];
+            await salvarContexto(from, {
+                ...contexto,
+                estado: EstadosFluxo.PANFLETO_AGUARDANDO_PRECO,
+                panfleto_produto_id:   melhor.id,
+                panfleto_produto_nome: melhor.produto_nome,
+            });
+
+            await sendTextMessage(from,
+                `✅ Encontrei: *${melhor.produto_nome}*\n` +
+                `Preço atual: R$ ${Number(melhor.preco).toFixed(2)}\n\n` +
+                `⚡ Qual o *preço especial de hoje*? (Ex: *8,50*)\n\n` +
+                `_A oferta expira automaticamente à meia-noite._`
+            );
+        } catch (err) {
+            logger.error({ err, from }, '[Panfleto] Erro ao buscar produto');
+            await sendTextMessage(from, '❌ Erro ao buscar no estoque. Tente novamente ou digita o nome diferente.');
+        }
+        return;
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // CENÁRIO: Panfleto — Passo 2 (recebe o preço e salva)
+    // ══════════════════════════════════════════════════════════
+    if (contexto.estado === EstadosFluxo.PANFLETO_AGUARDANDO_PRECO) {
+        if (!userMessageText.trim()) {
+            await sendTextMessage(from, 'Envie o preço especial de hoje (Ex: 8,50)');
+            return;
+        }
+
+        const precoStr = userMessageText.replace(/[^\d,\.]/g, '').replace(',', '.');
+        const novoPreco = parseFloat(precoStr);
+
+        if (isNaN(novoPreco) || novoPreco <= 0) {
+            await sendTextMessage(from, '❌ Preço inválido. Envie apenas o número (Ex: *8,50*).');
+            return;
+        }
+
+        const produtoId   = contexto.panfleto_produto_id!;
+        const produtoNome = contexto.panfleto_produto_nome!;
+
+        try {
+            await ativarPanfleto(produtoId, novoPreco);
+            await limparContexto(from);
+            await sendTextMessage(from,
+                `⚡ *Oferta Relâmpago ativada!*\n\n` +
+                `📦 Produto: *${produtoNome}*\n` +
+                `💰 Preço de hoje: *R$ ${novoPreco.toFixed(2)}*\n\n` +
+                `✅ O produto está em destaque nas buscas dos clientes e volta ao preço normal à meia-noite. 🌙`
+            );
+            await delay(400);
+            await enviarMenu(loja.nome, from);
+        } catch (err) {
+            logger.error({ err, from, produtoId, novoPreco }, '[Panfleto] Erro ao salvar oferta');
+            await sendTextMessage(from, '❌ Erro ao salvar a oferta. Tente novamente.');
         }
         return;
     }

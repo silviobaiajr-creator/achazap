@@ -31,3 +31,40 @@ export async function buscarOfertasAtivas(lojaId: string) {
     const { data } = await supabase.from('ofertas_desconto').select('*').eq('loja_id', lojaId).gte('validade', new Date().toISOString().split('T')[0]);
     return data || [];
 }
+
+/**
+ * Ativa uma Oferta Relâmpago (Panfleto) em um produto do catálogo.
+ * Atualiza o preço e define a expiração automática para a meia-noite do dia corrente.
+ */
+export async function ativarPanfleto(produtoId: string, novoPreco: number): Promise<void> {
+    // Meia-noite do dia corrente (UTC)
+    const meianoite = new Date();
+    meianoite.setHours(24, 0, 0, 0);
+
+    const { error } = await supabase
+        .from('catalogo_ativo')
+        .update({
+            preco: novoPreco,
+            oferta_expira_em: meianoite.toISOString(),
+        })
+        .eq('id', produtoId);
+
+    if (error) throw error;
+}
+
+/**
+ * Remove as Ofertas Relâmpago vencidas (expiradas).
+ * Deve ser chamado por um worker periódico ou no início do dia.
+ */
+export async function limparPanfletosVencidos(): Promise<number> {
+    const { data, error } = await supabase
+        .from('catalogo_ativo')
+        .update({ oferta_expira_em: null })
+        .lt('oferta_expira_em', new Date().toISOString())
+        .not('oferta_expira_em', 'is', null)
+        .select('id');
+
+    if (error) throw error;
+    return data?.length ?? 0;
+}
+

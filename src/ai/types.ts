@@ -22,6 +22,10 @@ export enum EstadosFluxo {
     // Estados do Consumidor
     ONBOARDING_CONSUMIDOR_LOCALIZACAO = 'ONBOARDING_CONSUMIDOR_LOCALIZACAO',
     CONSUMIDOR_IDLE = 'CONSUMIDOR_IDLE',
+
+    // Estados do Panfleto (Oferta Relâmpago)
+    PANFLETO_AGUARDANDO_PRODUTO   = 'PANFLETO_AGUARDANDO_PRODUTO',
+    PANFLETO_AGUARDANDO_PRECO     = 'PANFLETO_AGUARDANDO_PRECO',
 }
 
 export interface DadosProduto {
@@ -86,4 +90,6 @@ export interface ContextoSessao {
     alteracoesPlanejadas?: AlteracaoPlanejada[];
     totalItensRevisao?: number; // Contador para progresso da revisão
     revisaoIndice?: number; // Índice atual no loop de revisão de preços
+    panfleto_produto_id?: string;  // ID do produto selecionado para o panfleto
+    panfleto_produto_nome?: string; // Nome do produto selecionado para o panfleto
 }
