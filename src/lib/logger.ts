@@ -77,7 +77,8 @@ export function logTokens(
         promptTokenCount?: number;
         candidatesTokenCount?: number;
         totalTokenCount?: number;
-    }
+    },
+    limiteCustom?: number
 ) {
     if (!usageMetadata) return;
     const total = usageMetadata.totalTokenCount ?? 0;
@@ -94,9 +95,8 @@ export function logTokens(
     }, tokensMsg);
 
     // ── Fusível Financeiro: contabiliza tokens por número ─────────────────
-    // O 'from' pode ser 'system' (worker de embedding) — ignoramos esses.
     if (from && from !== 'system' && total > 0) {
-        const status = incrementarTokens(from, total);
+        const status = incrementarTokens(from, total, limiteCustom);
         if (status === 'aviso') {
             logger.warn({ from, operacao, total }, '[TokenFuse] ⚠️ 80% do limite diário atingido — atenção ao uso!');
         } else if (status === 'bloqueado') {

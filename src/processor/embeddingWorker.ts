@@ -2,6 +2,7 @@ import { boss } from '../queue/pgBossClient.js';
 import { logger } from '../lib/logger.js';
 import { pool } from '../lib/db.js';
 import { gerarEmbedding, decomporProduto } from '../ai/skills/catalog-ledger.js';
+import { TOKEN_LIMITE_IMPORTACAO } from '../lib/redis-cloud.js';
 
 const BATCH_SIZE = 10;
 
@@ -88,6 +89,16 @@ export async function startEmbeddingWorker() {
                         if (especificacao) partes.push(especificacao);
                         const textoBusca = partes.join(' ');
                         const vetor = await gerarEmbedding(textoBusca);
+
+                        // Contabiliza os tokens de embedding no fusível da loja (5M de limite)
+                        if (lojaId && vetor) {
+                            // Embedding usa ~10 tokens por produto — contabilizamos como custo da loja
+                            const { logTokens } = await import('../lib/logger.js');
+                            logTokens('embedding_worker', lojaId, lojaId,
+                                { promptTokenCount: 10, candidatesTokenCount: 0, totalTokenCount: 10 },
+                                TOKEN_LIMITE_IMPORTACAO
+                            );
+                        }
 
                         return { id: row.id, vetor, membro_core, marca, especificacao, unidade_medida, metadados, decompostoAgora };
                     })
