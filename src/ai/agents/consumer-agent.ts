@@ -149,14 +149,38 @@ export async function handleConsumer(
         if (itensAchados.length > 0) {
             msgBusca += `🎯 *Encontrei ${itensAchados.length} item(s) na sua região!*\n\n`;
             for (const { oferta } of itensAchados) {
+                // Destaques Visuais do Modelo de Negócios
+                const isPremium = oferta.plano === 'premium';
+                const isRelampago = oferta.oferta_expira_em && new Date(oferta.oferta_expira_em) > new Date();
+                
+                const seloPremium = isPremium ? ' ⭐(Loja Premium)' : '';
+                const seloRelampago = isRelampago ? ' ⚡(OFERTA RELÂMPAGO SÓ HOJE)' : '';
+
+                // Extração de Valor dos Metadados (em vez de focar só no menor preço)
+                let detalhesValor = '';
+                if (oferta.metadados) {
+                    const meta = oferta.metadados;
+                    const extras = [];
+                    if (meta.marca) extras.push(`Marca: ${meta.marca}`);
+                    if (meta.especificacao) extras.push(`Detalhes: ${meta.especificacao}`);
+                    // Adicionar outros trunfos de venda se existirem no JSON (ex: garantia, pronta entrega)
+                    if (meta.garantia) extras.push(`🛡️ Garantia: ${meta.garantia}`);
+                    if (meta.condicao) extras.push(`✨ Condição: ${meta.condicao}`);
+                    if (extras.length > 0) {
+                        detalhesValor = `\n   ↳ _${extras.join(' | ')}_`;
+                    }
+                }
+
+                // Ofertas Globais da Loja
                 const { data: promocoes } = await supabase
                     .from('ofertas_desconto').select('*')
                     .eq('loja_id', oferta.loja_id).eq('ativa', true)
                     .gte('validade', new Date().toISOString());
                 const promoText = (promocoes && promocoes.length > 0)
-                    ? `\n🎁 Promo: ${Number(promocoes[0].percentual)}% OFF acima de R$ ${promocoes[0].valor_minimo}`
+                    ? `\n   🎁 Cupom da Loja: ${Number(promocoes[0].percentual)}% OFF acima de R$ ${promocoes[0].valor_minimo}`
                     : '';
-                msgBusca += `🥇 *${oferta.produto_nome}*: R$ ${Number(oferta.preco_atual).toFixed(2).replace('.', ',')} / ${oferta.unidade}${promoText}\n\n`;
+
+                msgBusca += `🥇 *${oferta.produto_nome}*${seloPremium}${seloRelampago}\n   💰 Por R$ ${Number(oferta.preco_atual).toFixed(2).replace('.', ',')} / ${oferta.unidade}${detalhesValor}${promoText}\n\n`;
             }
         }
 
