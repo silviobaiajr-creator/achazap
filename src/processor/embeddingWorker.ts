@@ -4,7 +4,9 @@ import { pool } from '../lib/db.js';
 import { gerarEmbedding, decomporProduto } from '../ai/skills/catalog-ledger.js';
 import { TOKEN_LIMITE_IMPORTACAO } from '../lib/redis-cloud.js';
 
-const BATCH_SIZE = 10;
+const BATCH_SIZE = 5;          // Lote menor (era 10)
+const DELAY_ENTRE_ITENS_MS = 500;  // 500ms entre chamadas Gemini dentro do lote
+const MAX_PRODUTOS_POR_JOB = 200;  // Limite de segurança por execução de job
 
 export async function startEmbeddingWorker() {
     await boss.work('sync-embeddings', async (args: any) => {
@@ -12,9 +14,10 @@ export async function startEmbeddingWorker() {
         const { lojaId } = job.data as { lojaId?: string };
         logger.info({ lojaId, jobId: job.id }, '[EmbeddingWorker] Iniciando sincronização em background...');
 
-        let totalEmbeddings = 0;
+    let totalEmbeddings = 0;
         let totalDecompostos = 0;
         let hasMore = true;
+        let totalProcessados = 0; // Contador de segurança contra loop infinito de custo
         
         // Proteção contra Loop Infinito (Custo/Rate Limit):
         // Se a API falhar para um ID, ignoramos ele nas próximas buscas deste job
@@ -54,55 +57,55 @@ export async function startEmbeddingWorker() {
 
                 const { rows } = await client.query(query, params);
 
-                if (rows.length === 0) {
+                if (rows.length === 0 || totalProcessados >= MAX_PRODUTOS_POR_JOB) {
+                    if (totalProcessados >= MAX_PRODUTOS_POR_JOB) {
+                        logger.warn({ lojaId, totalProcessados }, '[EmbeddingWorker] Limite de segurança atingido — encerrando job. Enfileire outro job para continuar.');
+                    }
                     hasMore = false;
                     break;
                 }
 
-                // Processa cada produto em paralelo dentro do lote
-                const updates = await Promise.all(
-                    rows.map(async (row) => {
-                        let { membro_core, marca, especificacao, unidade_medida, metadados } = row;
-                        let decompostoAgora = false;
+                // Processa cada produto SEQUENCIALMENTE com delay para não sobrecarregar a API
+                // (Era Promise.all — causava 10 chamadas simultâneas = rajada de tokens)
+                const updates: any[] = [];
+                for (const row of rows) {
+                    let { membro_core, marca, especificacao, unidade_medida, metadados } = row;
+                    let decompostoAgora = false;
 
-                        // ── Decomposição: preenche campos NULL via Gemini ──────────────────
-                        // Só chama se algum campo essencial estiver faltando
-                        if (!membro_core || !marca) {
-                            const camadas = await decomporProduto(row.produto_nome);
-                            decompostoAgora = true;
-
-                            // Prioridade: valor existente no banco > valor extraído pelo Gemini
-                            membro_core    = membro_core    ?? camadas.membro_core;
-                            marca          = marca          ?? camadas.marca;
-                            especificacao  = especificacao  ?? camadas.especificacao;
-                            unidade_medida = unidade_medida ?? camadas.unidade_medida;
-
-                            // Mescla metadados sem sobrescrever o que já existe
-                            if (camadas.metadados && !metadados) {
-                                metadados = camadas.metadados;
-                            }
+                    // ── Decomposição: preenche campos NULL via Gemini ──────────────────
+                    // Só chama se membro_core ainda não foi extraído (evita reprocessar)
+                    if (!membro_core) {
+                        const camadas = await decomporProduto(row.produto_nome);
+                        decompostoAgora = true;
+                        membro_core    = membro_core    ?? camadas.membro_core;
+                        marca          = marca          ?? camadas.marca;
+                        especificacao  = especificacao  ?? camadas.especificacao;
+                        unidade_medida = unidade_medida ?? camadas.unidade_medida;
+                        if (camadas.metadados && !metadados) {
+                            metadados = camadas.metadados;
                         }
+                        // Delay entre chamadas Gemini para respeitar rate limit
+                        await new Promise(resolve => setTimeout(resolve, DELAY_ENTRE_ITENS_MS));
+                    }
 
-                        // ── Embedding: texto enriquecido com campos de decomposição ────────
-                        const partes = [row.produto_nome];
-                        if (marca)         partes.push(marca);
-                        if (especificacao) partes.push(especificacao);
-                        const textoBusca = partes.join(' ');
-                        const vetor = await gerarEmbedding(textoBusca);
+                    // ── Embedding ────────────────────────────────────────────────────────
+                    const partes = [row.produto_nome];
+                    if (marca)         partes.push(marca);
+                    if (especificacao) partes.push(especificacao);
+                    const textoBusca = partes.join(' ');
+                    const vetor = await gerarEmbedding(textoBusca);
 
-                        // Contabiliza os tokens de embedding no fusível da loja (5M de limite)
-                        if (lojaId && vetor) {
-                            // Embedding usa ~10 tokens por produto — contabilizamos como custo da loja
-                            const { logTokens } = await import('../lib/logger.js');
-                            logTokens('embedding_worker', lojaId, lojaId,
-                                { promptTokenCount: 10, candidatesTokenCount: 0, totalTokenCount: 10 },
-                                TOKEN_LIMITE_IMPORTACAO
-                            );
-                        }
+                    if (lojaId && vetor) {
+                        const { logTokens } = await import('../lib/logger.js');
+                        logTokens('embedding_worker', lojaId, lojaId,
+                            { promptTokenCount: 10, candidatesTokenCount: 0, totalTokenCount: 10 },
+                            TOKEN_LIMITE_IMPORTACAO
+                        );
+                    }
 
-                        return { id: row.id, vetor, membro_core, marca, especificacao, unidade_medida, metadados, decompostoAgora };
-                    })
-                );
+                    updates.push({ id: row.id, vetor, membro_core, marca, especificacao, unidade_medida, metadados, decompostoAgora });
+                    totalProcessados++;
+                }
 
                 // Salva no banco
                 for (const u of updates) {
