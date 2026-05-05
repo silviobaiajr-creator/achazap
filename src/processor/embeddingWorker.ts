@@ -2,11 +2,12 @@ import { boss } from '../queue/pgBossClient.js';
 import { logger } from '../lib/logger.js';
 import { pool } from '../lib/db.js';
 import { gerarEmbedding, decomporProduto } from '../ai/skills/catalog-ledger.js';
-import { TOKEN_LIMITE_IMPORTACAO } from '../lib/redis-cloud.js';
+import { logTokens } from '../lib/logger.js';
+import { incrementarQuotaDB, verificarQuotaBloqueadaDB, QUOTA_WORKER_DIARIA } from '../lib/token-quota.js';
 
-const BATCH_SIZE = 5;          // Lote menor (era 10)
-const DELAY_ENTRE_ITENS_MS = 500;  // 500ms entre chamadas Gemini dentro do lote
-const MAX_PRODUTOS_POR_JOB = 200;  // Limite de segurança por execução de job
+const BATCH_SIZE = 5;
+const DELAY_ENTRE_ITENS_MS = 500;
+const MAX_PRODUTOS_POR_JOB = 200;
 
 export async function startEmbeddingWorker() {
     await boss.work('sync-embeddings', async (args: any) => {
@@ -14,22 +15,28 @@ export async function startEmbeddingWorker() {
         const { lojaId } = job.data as { lojaId?: string };
         logger.info({ lojaId, jobId: job.id }, '[EmbeddingWorker] Iniciando sincronização em background...');
 
-    let totalEmbeddings = 0;
+        // ── PROTEÇÃO #1: Verifica quota persistente ANTES de qualquer chamada ──
+        // Diferente do MemoryCache, essa quota sobrevive a restarts do servidor.
+        const quotaBloqueada = await verificarQuotaBloqueadaDB('worker', QUOTA_WORKER_DIARIA);
+        if (quotaBloqueada) {
+            logger.warn({ lojaId }, '[EmbeddingWorker] Quota diária já atingida — job encerrado sem custo.');
+            return;
+        }
+
+        let totalEmbeddings = 0;
         let totalDecompostos = 0;
         let hasMore = true;
-        let totalProcessados = 0; // Contador de segurança contra loop infinito de custo
-        
-        // Proteção contra Loop Infinito (Custo/Rate Limit):
-        // Se a API falhar para um ID, ignoramos ele nas próximas buscas deste job
+        let totalProcessados = 0;
         const idsFalhos = new Set<string>();
 
         while (hasMore) {
             const client = await pool.connect();
             try {
-                // Busca produtos que precisam de qualquer enriquecimento:
-                // - embedding IS NULL       → precisa de gerarEmbedding()
-                // - membro_core IS NULL     → precisa de decomporProduto() (não extraído ainda)
-                // - marca IS NULL + csv     → PDV não tinha coluna_marca → precisa de decomporProduto()
+                // ── PROTEÇÃO #2: Query corrigida — critério restrito ──
+                // Antes: "membro_core IS NULL OR (marca IS NULL AND csv)"
+                //   → reprocessava todos os CSVs sem marca após cada restart
+                // Agora: apenas "membro_core IS NULL OR embedding IS NULL"
+                //   → após o primeiro processamento, nunca mais entra na fila
                 let query = `
                     SELECT id, produto_nome, membro_core, marca, especificacao, unidade_medida, metadados
                     FROM catalogo_ativo
@@ -37,7 +44,6 @@ export async function startEmbeddingWorker() {
                       AND (
                         embedding IS NULL
                         OR membro_core IS NULL
-                        OR (marca IS NULL AND fonte_ingestao = 'csv')
                       )
                 `;
                 const params: any[] = [];
@@ -59,21 +65,31 @@ export async function startEmbeddingWorker() {
 
                 if (rows.length === 0 || totalProcessados >= MAX_PRODUTOS_POR_JOB) {
                     if (totalProcessados >= MAX_PRODUTOS_POR_JOB) {
-                        logger.warn({ lojaId, totalProcessados }, '[EmbeddingWorker] Limite de segurança atingido — encerrando job. Enfileire outro job para continuar.');
+                        logger.warn({ lojaId, totalProcessados }, '[EmbeddingWorker] Limite de segurança atingido — encerrando job.');
                     }
                     hasMore = false;
                     break;
                 }
 
-                // Processa cada produto SEQUENCIALMENTE com delay para não sobrecarregar a API
-                // (Era Promise.all — causava 10 chamadas simultâneas = rajada de tokens)
-                const updates: any[] = [];
+                // ── PROTEÇÃO #3: Processamento + salvamento incremental ──
+                // Antes: acumulava tudo em updates[], salvava no final do lote
+                //   → se o servidor caísse no meio, nada era salvo e tudo rodava de novo
+                // Agora: salva no banco IMEDIATAMENTE após cada produto processado
                 for (const row of rows) {
+                    // Verifica quota antes de cada chamada Gemini
+                    if (await verificarQuotaBloqueadaDB('worker', QUOTA_WORKER_DIARIA)) {
+                        logger.warn({ lojaId }, '[EmbeddingWorker] Quota atingida durante processamento — encerrando.');
+                        hasMore = false;
+                        break;
+                    }
+
                     let { membro_core, marca, especificacao, unidade_medida, metadados } = row;
                     let decompostoAgora = false;
+                    const sets: string[] = ['atualizado_em = now()'];
+                    const vals: any[] = [];
+                    let idx = 1;
 
-                    // ── Decomposição: preenche campos NULL via Gemini ──────────────────
-                    // Só chama se membro_core ainda não foi extraído (evita reprocessar)
+                    // ── Decomposição (Gemini) ─────────────────────────────────────────
                     if (!membro_core) {
                         const camadas = await decomporProduto(row.produto_nome);
                         decompostoAgora = true;
@@ -81,81 +97,56 @@ export async function startEmbeddingWorker() {
                         marca          = marca          ?? camadas.marca;
                         especificacao  = especificacao  ?? camadas.especificacao;
                         unidade_medida = unidade_medida ?? camadas.unidade_medida;
-                        if (camadas.metadados && !metadados) {
-                            metadados = camadas.metadados;
-                        }
-                        // Delay entre chamadas Gemini para respeitar rate limit
-                        await new Promise(resolve => setTimeout(resolve, DELAY_ENTRE_ITENS_MS));
-                    }
+                        if (camadas.metadados && !metadados) metadados = camadas.metadados;
 
-                    // ── Embedding ────────────────────────────────────────────────────────
-                    const partes = [row.produto_nome];
-                    if (marca)         partes.push(marca);
-                    if (especificacao) partes.push(especificacao);
-                    const textoBusca = partes.join(' ');
-                    const vetor = await gerarEmbedding(textoBusca);
+                        // Contabiliza no banco (sobrevive a restart)
+                        await incrementarQuotaDB('worker', 590, QUOTA_WORKER_DIARIA);
 
-                    if (lojaId && vetor) {
-                        const { logTokens } = await import('../lib/logger.js');
-                        logTokens('embedding_worker', lojaId, lojaId,
-                            { promptTokenCount: 10, candidatesTokenCount: 0, totalTokenCount: 10 },
-                            TOKEN_LIMITE_IMPORTACAO
-                        );
-                    }
-
-                    updates.push({ id: row.id, vetor, membro_core, marca, especificacao, unidade_medida, metadados, decompostoAgora });
-                    totalProcessados++;
-                }
-
-                // Salva no banco
-                for (const u of updates) {
-                    const sets: string[] = ['atualizado_em = now()'];
-                    const vals: any[] = [];
-                    let idx = 1;
-
-                    if (u.vetor) {
-                        sets.push(`embedding = $${idx++}`);
-                        vals.push(`[${u.vetor.join(',')}]`);
-                    }
-
-                    if (u.decompostoAgora) {
-                        // membro_core: sempre atualiza (é o campo principal da decomposição)
                         sets.push(`membro_core = $${idx++}`);
-                        vals.push(u.membro_core);
-
-                        // Demais campos: COALESCE para não sobrescrever valor que o PDV já forneceu
+                        vals.push(membro_core);
                         sets.push(`marca = COALESCE(marca, $${idx++})`);
-                        vals.push(u.marca);
-
+                        vals.push(marca);
                         sets.push(`especificacao = COALESCE(especificacao, $${idx++})`);
-                        vals.push(u.especificacao);
-
+                        vals.push(especificacao);
                         sets.push(`unidade_medida = COALESCE(unidade_medida, $${idx++})`);
-                        vals.push(u.unidade_medida);
-
-                        if (u.metadados) {
+                        vals.push(unidade_medida);
+                        if (metadados) {
                             sets.push(`metadados = COALESCE(metadados, $${idx++})`);
-                            vals.push(JSON.stringify(u.metadados));
+                            vals.push(JSON.stringify(metadados));
                         }
 
                         totalDecompostos++;
+                        // Delay após cada chamada Gemini
+                        await new Promise(resolve => setTimeout(resolve, DELAY_ENTRE_ITENS_MS));
                     }
 
-                    vals.push(u.id);
+                    // ── Embedding ─────────────────────────────────────────────────────
+                    const partes = [row.produto_nome];
+                    if (marca)         partes.push(marca);
+                    if (especificacao) partes.push(especificacao);
+                    const vetor = await gerarEmbedding(partes.join(' '));
+
+                    if (vetor) {
+                        sets.push(`embedding = $${idx++}`);
+                        vals.push(`[${vetor.join(',')}]`);
+                        await incrementarQuotaDB('worker', 10, QUOTA_WORKER_DIARIA);
+                        totalEmbeddings++;
+                    } else {
+                        idsFalhos.add(row.id);
+                    }
+
+                    // ── Salva IMEDIATAMENTE no banco (incremental) ────────────────────
+                    // Se o servidor cair aqui, este produto já está salvo e não será reprocessado.
+                    vals.push(row.id);
                     await client.query(
                         `UPDATE catalogo_ativo SET ${sets.join(', ')} WHERE id = $${idx}`,
                         vals
                     );
-                    
-                    if (u.vetor) {
-                        totalEmbeddings++;
-                    } else {
-                        // Se não gerou vetor (falha na API), adiciona aos falhos para evitar loop infinito
-                        idsFalhos.add(u.id);
-                    }
+
+                    totalProcessados++;
                 }
 
-                // Delay para respeitar rate limit da API (lotes de 10 com 1s de intervalo)
+                // Delay entre lotes
                 await new Promise(resolve => setTimeout(resolve, 1000));
             } catch (err) {
                 logger.error({ err }, '[EmbeddingWorker] Erro no lote');
@@ -166,6 +157,6 @@ export async function startEmbeddingWorker() {
             }
         }
 
-        logger.info({ totalEmbeddings, totalDecompostos, lojaId }, '[EmbeddingWorker] Sincronização concluída');
+        logger.info({ totalEmbeddings, totalDecompostos, totalProcessados, lojaId }, '[EmbeddingWorker] Sincronização concluída');
     });
 }
