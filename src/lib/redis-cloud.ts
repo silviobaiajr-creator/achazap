@@ -128,6 +128,38 @@ export function ttlBucketMidia(whatsapp: string): number {
 }
 
 // ============================================================
+// Token Bucket para Anti-Flood de Texto em IDLE (Proteção Global)
+// ============================================================
+const BUCKET_TEXTO_LIMITE = 20;           // máx de msgs texto em IDLE por janela
+const BUCKET_TEXTO_JANELA = 60 * 1000;    // janela de 1 minuto (ms)
+
+/**
+ * Incrementa o contador de textos e impede text-flooding do bot.
+ * Usado antes de acionar a detecção NLP.
+ */
+export function incrementarBucketFloodTexto(whatsapp: string): boolean {
+    const key = `bucket_texto:${whatsapp}`;
+    const entry = cache.get(key) as { count: number } | null;
+
+    if (!entry) {
+        cache.set(key, { count: 1 }, BUCKET_TEXTO_JANELA);
+        return false;
+    }
+
+    const novoCount = entry.count + 1;
+    cache.set(key, { count: novoCount }, BUCKET_TEXTO_JANELA);
+    return novoCount > BUCKET_TEXTO_LIMITE;
+}
+
+export function ttlBucketFloodTexto(whatsapp: string): number {
+    const key = `bucket_texto:${whatsapp}`;
+    const raw = (cache as any)['store'].get(key) as { expiresAt: number } | undefined;
+    if (!raw) return 0;
+    const msRestante = Math.max(0, raw.expiresAt - Date.now());
+    return Math.ceil(msRestante / 1000);
+}
+
+// ============================================================
 // Escudo Global de Spam (Proteção para bloqueios repetitivos)
 // ============================================================
 

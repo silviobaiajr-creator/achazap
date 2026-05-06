@@ -19,6 +19,8 @@ import {
     cache,
     incrementarBucketMidia,
     ttlBucketMidia,
+    incrementarBucketFloodTexto,
+    ttlBucketFloodTexto,
     temAvisoSpam,
     setAvisoSpam,
 } from '../lib/redis-cloud.js';
@@ -725,6 +727,22 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
         // ✍️ Ingestão Proativa: Texto em IDLE
         if (isTextOnly && userMessageText.trim()) {
             
+            // ── CAMADA: Token Bucket Text Flood — máx 20 textos/minuto por lojista ──
+            const textFloodExcedido = incrementarBucketFloodTexto(from);
+            if (textFloodExcedido) {
+                const ttlSecs = ttlBucketFloodTexto(from);
+                logger.warn({ from, ttlSecs }, '[Anti-Flood] Token bucket de texto excedido. Usuário inundando o bot.');
+                
+                // Só notifica o spam se ainda não foi notificado para não piorar o flood
+                if (!temAvisoSpam(from)) {
+                    setAvisoSpam(from, 60); // silencio forçado por 60s
+                    await sendTextMessage(from, '⚠️ Detectei muitas mensagens seguidas. Por segurança, aguarde 1 minuto antes de enviar mais mensagens!');
+                } else {
+                    setAvisoSpam(from, 60);
+                }
+                return;
+            }
+
             // Comando de Revisão de Preços (Sprint Validade)
             if (userMessageText.toLowerCase().includes('/revisar')) {
                 await processarRevisaoPrecos(from, loja);

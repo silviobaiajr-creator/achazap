@@ -35,9 +35,9 @@ export async function incrementarQuotaDB(
         });
 
         if (error) {
-            // Falha no banco: deixa passar mas loga o erro (fail-open para não travar o bot)
-            logger.warn({ error: error.message, chave, tokens }, '[TokenQuota] Falha ao registrar tokens — continuando sem proteção');
-            return 'ok';
+            // Falha no banco: FAIL-CLOSED para evitar rombo se Supabase cair
+            logger.error({ error: error.message, chave, tokens }, '🛡️ [DEFESA] Falha ao comunicar com Supabase RPC. Fail-closed ativado para evitar chamadas de API invisíveis.');
+            return 'bloqueado';
         }
 
         const resultado = Array.isArray(data) ? data[0] : data;
@@ -55,8 +55,8 @@ export async function incrementarQuotaDB(
 
         return 'ok';
     } catch (e) {
-        logger.warn({ e, chave }, '[TokenQuota] Exceção ao verificar quota — continuando');
-        return 'ok';
+        logger.error({ e, chave }, '🛡️ [DEFESA] Exceção crítica ao registrar quota — fail-closed ativado.');
+        return 'bloqueado';
     }
 }
 
@@ -73,10 +73,10 @@ export async function verificarQuotaBloqueadaDB(
             p_chave:  chave,
             p_limite: limite,
         });
-        if (error) return false; // fail-open
+        if (error) return true; // fail-closed (bloqueado)
         return data === true;
     } catch {
-        return false; // fail-open
+        return true; // fail-closed (bloqueado)
     }
 }
 
