@@ -397,3 +397,63 @@ export function extractMessage(body: unknown): WhatsAppMessage | null {
         return null;
     }
 }
+
+/**
+ * Envia um Template Oficial de Marketing para um número WhatsApp.
+ * Obrigatório para mensagens iniciadas pela empresa fora da janela de 24h.
+ * O template deve estar previamente aprovado no Facebook Business Manager.
+ *
+ * @param to              Número WhatsApp destino (ex: '5591999998888')
+ * @param templateName    Nome exato do template aprovado na Meta (ex: 'alerta_oferta_sniper')
+ * @param bodyVariables   Lista de variáveis {{1}}, {{2}} do corpo do template
+ * @param buttons         Botões Quick Reply (até 3). Texto deve bater com o cadastrado na Meta.
+ */
+export async function sendTemplateMessage(
+    to: string,
+    templateName: string,
+    bodyVariables: string[],
+    buttons: Array<{ type: 'quick_reply'; text: string }>
+): Promise<void> {
+    // Simulador local: não envia de verdade durante desenvolvimento
+    if (!ACCESS_TOKEN || ACCESS_TOKEN.startsWith('EAAxxxxx')) {
+        console.log(`\n📱 [SIMULADOR TEMPLATE] → ${to}`);
+        console.log(`  Template: ${templateName}`);
+        console.log(`  Variáveis: ${JSON.stringify(bodyVariables)}`);
+        console.log(`  Botões: ${buttons.map(b => b.text).join(' | ')}\n`);
+        return;
+    }
+
+    const components: object[] = [
+        {
+            type: 'body',
+            parameters: bodyVariables.map(v => ({ type: 'text', text: v })),
+        },
+    ];
+
+    if (buttons.length > 0) {
+        buttons.forEach((btn, idx) => {
+            components.push({
+                type: 'button',
+                sub_type: 'quick_reply',
+                index: idx,
+                parameters: [{ type: 'payload', payload: btn.text }],
+            });
+        });
+    }
+
+    await axios.post(
+        `${BASE_URL}/${PHONE_NUMBER_ID}/messages`,
+        {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to,
+            type: 'template',
+            template: {
+                name: templateName,
+                language: { code: 'pt_BR' },
+                components,
+            },
+        },
+        { headers: { Authorization: `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+}

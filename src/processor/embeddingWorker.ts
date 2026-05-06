@@ -158,5 +158,37 @@ export async function startEmbeddingWorker() {
         }
 
         logger.info({ totalEmbeddings, totalDecompostos, totalProcessados, lojaId }, '[EmbeddingWorker] Sincronização concluída');
+
+        // ── Disparo do Worker de Notificações em Real-Time ────────────────────
+        // Após os embeddings estarem prontos, o NotificationWorker verifica se
+        // algum consumidor tem alertas ativos que batem com os produtos processados.
+        if (lojaId && totalProcessados > 0) {
+            try {
+                // Busca os produtos que acabaram de ser processados com seus preços e localização
+                const client2 = await pool.connect();
+                try {
+                    const { rows: produtosProcessados } = await client2.query(
+                        `SELECT ca.id, ca.produto_nome, ca.membro_core, ca.preco::float, ca.unidade,
+                                l.cidade, l.bairro, l.estado
+                         FROM catalogo_ativo ca
+                         JOIN lojas l ON l.id = ca.loja_id
+                         WHERE ca.loja_id = $1
+                           AND ca.disponivel = true
+                           AND ca.atualizado_em >= now() - interval '10 minutes'
+                         LIMIT 50`,
+                        [lojaId]
+                    );
+                    if (produtosProcessados.length > 0) {
+                        await boss.send('checar-alertas', { lojaId, produtos: produtosProcessados }, { retryLimit: 1 });
+                        logger.info({ lojaId, qtd: produtosProcessados.length }, '[EmbeddingWorker] Job checar-alertas agendado.');
+                    }
+                } finally {
+                    client2.release();
+                }
+            } catch (alertErr) {
+                // Non-critical: falha no agendamento de alertas não deve travar o embeddingWorker
+                logger.warn({ alertErr, lojaId }, '[EmbeddingWorker] Falha ao agendar checar-alertas (non-critical).');
+            }
+        }
     });
 }

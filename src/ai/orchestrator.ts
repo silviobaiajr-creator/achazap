@@ -337,6 +337,72 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
     const isUsuarioConsumidor = !loja && contexto?.estado === EstadosFluxo.CONSUMIDOR_IDLE;
     
     if (isUsuarioConsumidor) {
+
+        // ── 🔴 INTERCEPTAÇÃO 1: OPT-OUT PRIORITÁRIO (antes de qualquer IA) ──
+        // Regra de Ouro: silenciar IMEDIATAMENTE ao clicar em "Parar Alertas"
+        if (buttonId === '❌ Parar Alertas' || buttonId === 'optout_ofertas' ||
+            /^(parar|stop|cancelar alertas|não quero mais alertas)$/i.test(userMessageText.trim())) {
+            await supabase.rpc('optout_consumidor', { p_whatsapp: from });
+            await sendTextMessage(from,
+                '✅ Pronto! Você não receberá mais alertas de ofertas.\n\n' +
+                '_Se mudar de ideia, é só me enviar qualquer mensagem e usar o menu de Alertas._'
+            );
+            return;
+        }
+
+        // ── 🟢 INTERCEPTAÇÃO 2: ENGAJAMENTO CONTÍNUO (botão "Quero ver mais") ──
+        // Registra que o consumidor respondeu, abrindo a janela de 24h para alertas gratuitos
+        if (buttonId === '➕ Quero ver mais' || buttonId === 'optin_mais_alertas') {
+            await supabase.rpc('registrar_engajamento_consumidor', { p_whatsapp: from });
+            await sendTextMessage(from,
+                '🎯 Fechado! Meu radar continua ligado hoje.\n\n' +
+                '_Se eu achar um preço melhor ou uma nova oferta que bate com o que você quer, te aviso na hora!_'
+            );
+            return;
+        }
+
+        // ── 🔔 INTERCEPTAÇÃO 3: OPT-IN POR LINGUAGEM NATURAL ──
+        // Detecta frases como "Me avise quando X baixar", "quero alerta de Y"
+        const padraoAlerta = /(?:me (?:avise|avisa|notifique|notifica|chame|chama)|quero (?:alerta|aviso|ser avisado)|alerta (?:de|quando)|quando.*(?:baixar|ficar barato))/i;
+        if (isTextOnly && padraoAlerta.test(userMessageText)) {
+            // Extrai termo e preço alvo via Gemini (mini prompt)
+            try {
+                const resultAlerta = await ai.models.generateContent({
+                    model: GEMINI_MODEL,
+                    contents: `Extraia o produto e o preço alvo da mensagem abaixo. Se não houver preço alvo, retorne null. Responda APENAS JSON.\nMensagem: "${userMessageText.substring(0, 200)}"\nJSON: {"termo": "...", "preco_alvo": null}`,
+                    config: { responseMimeType: 'application/json' },
+                });
+                const dadosAlerta = JSON.parse(resultAlerta.text || '{}');
+                const termo = dadosAlerta.termo?.trim();
+                const precoAlvo = dadosAlerta.preco_alvo ? parseFloat(dadosAlerta.preco_alvo) : null;
+
+                if (termo && termo.length > 2) {
+                    const tipo = precoAlvo ? 'sniper_preco' : 'produto_desejado';
+                    await supabase.rpc('upsert_alerta_consumidor', {
+                        p_whatsapp:   from,
+                        p_cidade:     contexto?.dadosConsumidor?.cidade ?? null,
+                        p_bairro:     contexto?.dadosConsumidor?.bairro ?? null,
+                        p_estado:     contexto?.dadosConsumidor?.estado ?? null,
+                        p_tipo:       tipo,
+                        p_termo:      termo,
+                        p_preco_alvo: precoAlvo,
+                    });
+
+                    const msg = precoAlvo
+                        ? `🎯 *Alerta Sniper ativado!*\n\nVou te chamar aqui quando *${termo}* aparecer por R$ ${precoAlvo.toFixed(2).replace('.', ',')} ou menos na sua região!\n\n_Para cancelar, clique em Parar Alertas ou me diga._`
+                        : `🔔 *Radar ativado!*\n\nVou te avisar quando qualquer loja perto de você cadastrar *${termo}* a um bom preço!\n\n_Para cancelar, clique em Parar Alertas ou me diga._`;
+                    await sendTextMessage(from, msg);
+                    return;
+                }
+            } catch (alertErr) {
+                logger.warn({ alertErr, from }, '[Consumidor] Falha ao extrair alerta por NLP — continuando fluxo normal');
+            }
+        }
+
+        // ── Registra engajamento para qualquer resposta do consumidor ──────────
+        // Isso mantém a janela de 24h aberta para mensagens gratuitas
+        void (async () => { try { await supabase.rpc('registrar_engajamento_consumidor', { p_whatsapp: from }); } catch { /* best-effort */ } })();
+
         if (buttonId.startsWith('revelar_')) {
             const [, idOferta, idLoja] = buttonId.split('_');
             
