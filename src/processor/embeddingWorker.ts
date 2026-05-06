@@ -169,7 +169,7 @@ export async function startEmbeddingWorker() {
                 try {
                     const { rows: produtosProcessados } = await client2.query(
                         `SELECT ca.id, ca.produto_nome, ca.membro_core, ca.preco::float, ca.unidade,
-                                l.cidade, l.bairro, l.estado
+                                l.cidade, l.bairro, l.estado, l.plano, l.nome AS loja_nome, l.whatsapp AS loja_whatsapp
                          FROM catalogo_ativo ca
                          JOIN lojas l ON l.id = ca.loja_id
                          WHERE ca.loja_id = $1

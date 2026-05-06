@@ -27,6 +27,9 @@ interface AlertaJob {
         cidade: string | null;
         bairro: string | null;
         estado: string | null;
+        plano: string | null;
+        loja_nome: string | null;
+        loja_whatsapp: string | null;
     }>;
 }
 
@@ -154,8 +157,13 @@ async function enviarAlertaTemplate(
     // Monta o corpo com até 3 produtos para não extrapolar o limite do template
     const top3 = produtos.slice(0, 3);
     const listaOfertas = top3
-        .map(p => `• *${p.produto_nome}* — R$ ${p.preco.toFixed(2).replace('.', ',')} / ${p.unidade}`)
-        .join('\n');
+        .map(p => {
+            if (p.plano === 'premium') {
+                return `⭐ *${p.produto_nome}* — R$ ${p.preco.toFixed(2).replace('.', ',')} na loja *${p.loja_nome}*\n📲 Zap da loja: ${p.loja_whatsapp}`;
+            }
+            return `• *${p.produto_nome}* — R$ ${p.preco.toFixed(2).replace('.', ',')} / ${p.unidade}`;
+        })
+        .join('\n\n');
 
     const totalExtra = produtos.length - top3.length;
     const rodape = totalExtra > 0
@@ -187,8 +195,13 @@ async function enviarAlertaJanelaAberta(
     const { sendTextMessage } = await import('../lib/whatsapp.js');
     const top3 = produtos.slice(0, 3);
     const listaOfertas = top3
-        .map(p => `• *${p.produto_nome}* — R$ ${p.preco.toFixed(2).replace('.', ',')} / ${p.unidade}`)
-        .join('\n');
+        .map(p => {
+            if (p.plano === 'premium') {
+                return `⭐ *${p.produto_nome}* — R$ ${p.preco.toFixed(2).replace('.', ',')} na loja *${p.loja_nome}*\n📲 Zap da loja: ${p.loja_whatsapp}`;
+            }
+            return `• *${p.produto_nome}* — R$ ${p.preco.toFixed(2).replace('.', ',')} / ${p.unidade}`;
+        })
+        .join('\n\n');
 
     await sendTextMessage(
         whatsapp,

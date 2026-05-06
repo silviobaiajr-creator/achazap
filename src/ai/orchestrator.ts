@@ -543,7 +543,12 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                     const promoText = (promocoes && promocoes.length > 0)
                         ? `\n🎁 Promo: ${Number(promocoes[0].percentual)}% OFF acima de R$ ${promocoes[0].valor_minimo}`
                         : '';
-                    msgBusca += `🥇 *${oferta.produto_nome}*: R$ ${Number(oferta.preco_atual).toFixed(2).replace('.', ',')} / ${oferta.unidade}${promoText}\n\n`;
+                    
+                    if (oferta.plano === 'premium') {
+                        msgBusca += `⭐ *${oferta.produto_nome}*: R$ ${Number(oferta.preco_atual).toFixed(2).replace('.', ',')} na loja *${oferta.loja_nome}*\n📲 WhatsApp: ${oferta.whatsapp_loja}${promoText}\n\n`;
+                    } else {
+                        msgBusca += `🥇 *${oferta.produto_nome}*: R$ ${Number(oferta.preco_atual).toFixed(2).replace('.', ',')} / ${oferta.unidade}${promoText}\n\n`;
+                    }
                 }
             }
 
@@ -561,19 +566,25 @@ export async function processMessage(msg: WhatsAppMessage): Promise<void> {
                 }
             }
 
-            // Botões de revelar apenas para os itens achados com certeza
+            // Botões de revelar apenas para os itens achados de lojas básicas
             if (itensAchados.length > 0) {
-                const top3 = itensAchados.slice(0, 3);
-                const botoes = top3.map(({ oferta }, idx) => ({
+                const itensBasicos = itensAchados.filter(i => i.oferta.plano !== 'premium');
+                const botoes = itensBasicos.slice(0, 3).map(({ oferta }, idx) => ({
                     id: `revelar_${oferta.id}_${oferta.loja_id}`,
                     title: `🔓 Revelar Op. ${idx + 1}`
                 }));
-                if (itensAmbiguos.length === 0) {
-                    msgBusca += `👀 Deseja revelar a loja de qual opção? (Isso gasta créditos do lojista!)`;
+                
+                if (botoes.length > 0) {
+                    if (itensAmbiguos.length === 0) {
+                        msgBusca += `👀 Deseja revelar a loja de qual opção não identificada acima? (Gasta créditos do lojista!)`;
+                    }
+                    await sendInteractiveButtons(from, msgBusca, botoes);
+                } else {
+                    // Se só havia premium, não há botões de revelação para mostrar
+                    await sendTextMessage(from, msgBusca.trim());
                 }
-                await sendInteractiveButtons(from, msgBusca, botoes);
             } else {
-                // Só há ambiguidade — envia texto sem botões de revelar
+                // Só há ambiguidade ou itens não achados
                 await sendTextMessage(from, msgBusca.trim());
             }
             return;
