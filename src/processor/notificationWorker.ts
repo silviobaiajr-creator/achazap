@@ -159,15 +159,15 @@ async function enviarAlertaTemplate(
     const listaOfertas = top3
         .map(p => {
             if (p.plano === 'premium') {
-                return `⭐ *${p.produto_nome}* — R$ ${p.preco.toFixed(2).replace('.', ',')} na loja *${p.loja_nome}*\n📲 Zap da loja: ${p.loja_whatsapp}`;
+                return `⭐ *${p.produto_nome}* — R$ ${p.preco.toFixed(2).replace('.', ',')} na loja *${p.loja_nome}* (Zap: ${p.loja_whatsapp})`;
             }
             return `• *${p.produto_nome}* — R$ ${p.preco.toFixed(2).replace('.', ',')} / ${p.unidade}`;
         })
-        .join('\n\n');
+        .join(' | ');
 
     const totalExtra = produtos.length - top3.length;
     const rodape = totalExtra > 0
-        ? `\n\n_...e mais ${totalExtra} oferta(s) disponíveis!_`
+        ? ` ...e mais ${totalExtra} oferta(s) disponíveis!`
         : '';
 
     // Template: alerta_oferta_sniper
@@ -178,10 +178,7 @@ async function enviarAlertaTemplate(
         whatsapp,
         'alerta_oferta_sniper',
         [listaOfertas, rodape],
-        [
-            { type: 'quick_reply', text: '➕ Quero ver mais' },
-            { type: 'quick_reply', text: '❌ Parar Alertas' },
-        ]
+        []
     );
 
     logger.info({ whatsapp: whatsapp.slice(-4), qtd: top3.length }, '[NotifWorker] Template disparado.');
